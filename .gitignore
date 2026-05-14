@@ -8,12 +8,11 @@ venv/
 logs/
 *.log
 
-# Spark
+# Spark generated data
+data/
+checkpoints/
 spark-warehouse/
 metastore_db/
-checkpoint/
-checkpoints/
 
-# OS / editor
-.DS_Store
+# Editor
 .vscode/

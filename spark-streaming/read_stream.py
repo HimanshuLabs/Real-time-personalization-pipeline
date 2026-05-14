@@ -94,10 +94,11 @@ invalid_df = (
 
 valid_query = (
     valid_df.writeStream
-    .format("console")
-    .option("truncate", False)
+    .format("parquet")
+    .option("path", "data/bronze/user_events")
+    .option("checkpointLocation", "checkpoints/bronze_user_events")
     .outputMode("append")
-    .queryName("valid_events_stream")
+    .queryName("bronze_user_events_writer")
     .start()
 )
 
