@@ -32,6 +32,7 @@ def generate_event():
 
 while True:
     event = generate_event()
+
     producer.send("user_events", value=event)
     producer.flush()
 
