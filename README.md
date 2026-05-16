@@ -4,8 +4,6 @@
 
 This project is an end-to-end real-time data engineering pipeline that simulates user activity events, streams them through Kafka, processes them using Spark Structured Streaming, applies schema validation and Dead Letter Queue routing, stores clean data in Medallion layers, publishes Gold-level user features to PostgreSQL, and exposes them through a FastAPI feature-serving endpoint.
 
-The goal is to demonstrate a production-style streaming data pipeline, not a one-shot notebook.
-
 ---
 
 ## 2. Architecture
