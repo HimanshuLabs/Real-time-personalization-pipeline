@@ -23,3 +23,6 @@ venv-airflow/
 airflow.db
 standalone_admin_password.txt
 webserver_config.py
+
+# Local temporary shell files
+tmp*.sh
