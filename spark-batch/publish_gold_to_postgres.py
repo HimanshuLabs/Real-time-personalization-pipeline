@@ -1,5 +1,12 @@
 from pyspark.sql import SparkSession
 
+
+POSTGRES_URL = "jdbc:postgresql://localhost:5433/personalization_db"
+POSTGRES_TABLE = "user_features"
+POSTGRES_USER = "de_user"
+POSTGRES_PASSWORD = "de_password"
+
+
 spark = (
     SparkSession.builder
     .appName("PublishGoldUserFeaturesToPostgres")
@@ -8,44 +15,26 @@ spark = (
 
 spark.sparkContext.setLogLevel("WARN")
 
-gold_df = spark.read.parquet(
-    "data/gold/user_features"
-)
+gold_df = spark.read.parquet("data/gold/user_features")
 
-# Improve JDBC parallelism
+gold_count = gold_df.count()
+print(f"Gold user_features row count before PostgreSQL publish: {gold_count}")
 
-gold_df = gold_df.repartition(4)
-
-postgres_url = (
-    "jdbc:postgresql://localhost:5433/personalization_db"
-)
-
-postgres_properties = {
-    "user": "de_user",
-    "password": "de_password",
-    "driver": "org.postgresql.Driver"
-}
+if gold_count == 0:
+    raise RuntimeError("Gold user_features table is empty. Refusing to publish 0 rows.")
 
 (
     gold_df.write
+    .format("jdbc")
+    .option("url", POSTGRES_URL)
+    .option("dbtable", POSTGRES_TABLE)
+    .option("user", POSTGRES_USER)
+    .option("password", POSTGRES_PASSWORD)
+    .option("driver", "org.postgresql.Driver")
     .mode("overwrite")
-    .option("truncate", "true")
-    .jdbc(
-        url=postgres_url,
-        table="user_features",
-        properties=postgres_properties
-    )
+    .save()
 )
 
-print(
-    "Gold user features published to PostgreSQL successfully."
-)
+print("Gold user_features published to PostgreSQL successfully.")
 
-print(
-    f"Published record count: {gold_df.count()}"
-)
-
-gold_df.show(
-    10,
-    truncate=False
-)
+spark.stop()

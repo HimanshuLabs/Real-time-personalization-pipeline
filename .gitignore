@@ -16,3 +16,10 @@ metastore_db/
 
 # Editor
 .vscode/
+
+# Airflow local runtime
+airflow_home/
+venv-airflow/
+airflow.db
+standalone_admin_password.txt
+webserver_config.py
