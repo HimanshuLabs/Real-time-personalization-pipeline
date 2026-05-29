@@ -1,0 +1,89 @@
+flowchart LR
+    %% Project 1 — Real-Time Personalization Pipeline
+
+    subgraph SRC["1. Sources"]
+        GEN["Python Event Generator<br/>Synthetic clickstream events"]
+        USERDIM["User Reference Data<br/>segment, city, device preference"]
+        PRODDIM["Product Reference Data<br/>category, brand, price"]
+    end
+
+    subgraph KAFKA["2. Kafka Ingestion"]
+        TOPIC["Kafka Topic<br/>user_events"]
+        DLQ["Kafka DLQ Topic<br/>user_events_dlq"]
+    end
+
+    subgraph STREAM["3. Spark Structured Streaming"]
+        READ["Read Kafka Stream<br/>topic, partition, offset"]
+        PARSE["Parse JSON Payload"]
+        VALIDATE{"Valid Event?"}
+        NORMALIZE["Normalize Schema"]
+        EVENTTIME["Event-Time Processing<br/>watermarking"]
+        DEDUP["Deduplicate<br/>by event_id"]
+        BRONZEWRITE["Write Valid Events<br/>to Bronze"]
+    end
+
+    subgraph LAKE["4. Lakehouse Storage"]
+        BRONZE["Bronze Layer<br/>raw valid events"]
+        SILVER["Silver Layer<br/>cleaned + enriched events"]
+        GOLD["Gold Layer<br/>user feature aggregates"]
+    end
+
+    subgraph BATCH["5. Airflow-Orchestrated Batch Pipeline"]
+        AIRFLOW["Apache Airflow DAG"]
+        B2S["Spark Job<br/>Bronze to Silver"]
+        S2G["Spark Job<br/>Silver to Gold"]
+        G2P["Spark Job<br/>Gold to PostgreSQL"]
+    end
+
+    subgraph SERVE["6. Feature Serving Layer"]
+        PG["PostgreSQL<br/>user_features table"]
+        API["FastAPI Service<br/>/health<br/>/features/{user_id}"]
+        CLIENT["Client / Recruiter Demo<br/>curl or browser"]
+    end
+
+    subgraph OPS["7. Production-Style Controls"]
+        CHECKPOINT["Spark Checkpoints"]
+        REPLAY["Replay Strategy<br/>Kafka offsets + DLQ replay"]
+        QUALITY["Data Quality Checks<br/>Silver / Gold validation"]
+        CICD["GitHub Actions<br/>planned CI/CD"]
+        MONITOR["Prometheus + Grafana<br/>planned monitoring"]
+    end
+
+    GEN --> TOPIC
+
+    TOPIC --> READ
+    READ --> PARSE
+    PARSE --> VALIDATE
+
+    VALIDATE -- "No: malformed / invalid" --> DLQ
+    VALIDATE -- "Yes" --> NORMALIZE
+
+    NORMALIZE --> EVENTTIME
+    EVENTTIME --> DEDUP
+    DEDUP --> BRONZEWRITE
+    BRONZEWRITE --> BRONZE
+
+    USERDIM --> B2S
+    PRODDIM --> B2S
+
+    AIRFLOW --> B2S
+    AIRFLOW --> S2G
+    AIRFLOW --> G2P
+
+    BRONZE --> B2S
+    B2S --> SILVER
+    SILVER --> S2G
+    S2G --> GOLD
+    GOLD --> G2P
+    G2P --> PG
+
+    PG --> API
+    API --> CLIENT
+
+    STREAM -. uses .-> CHECKPOINT
+    DLQ -. supports .-> REPLAY
+    BRONZE -. supports .-> REPLAY
+    SILVER -. validated by .-> QUALITY
+    GOLD -. validated by .-> QUALITY
+    API -. future metrics .-> MONITOR
+    AIRFLOW -. future validation .-> CICD
