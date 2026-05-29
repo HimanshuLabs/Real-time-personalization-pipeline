@@ -39,7 +39,7 @@ def root():
 @app.get("/health")
 def health_check():
     try:
-        with get_db_connection() as conn:
+        with get_db_connection():
             return {
                 "status": "healthy",
                 "postgres": "connected"

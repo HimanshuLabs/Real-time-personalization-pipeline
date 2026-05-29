@@ -225,8 +225,8 @@ silver_df = df.select(final_columns + remaining_columns)
 silver_df.write.mode("overwrite").parquet(SILVER_PATH)
 
 silver_count = silver_df.count()
-missing_user_ref_count = silver_df.where(col("is_user_reference_missing") == True).count()
-missing_product_ref_count = silver_df.where(col("is_product_reference_missing") == True).count()
+missing_user_ref_count = silver_df.where(col("is_user_reference_missing")).count()
+missing_product_ref_count = silver_df.where(col("is_product_reference_missing")).count()
 
 report = {
     "silver_record_count": silver_count,
