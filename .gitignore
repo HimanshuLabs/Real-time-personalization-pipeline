@@ -26,3 +26,6 @@ webserver_config.py
 
 # Local temporary shell files
 tmp*.sh
+
+# Runtime logs
+logs/
