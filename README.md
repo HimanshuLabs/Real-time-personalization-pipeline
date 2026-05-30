@@ -524,3 +524,51 @@ The pipeline can:
 - serve user features through FastAPI
 
 ---
+## Observability: Prometheus + Grafana
+
+This project includes a local observability layer for the real-time personalization pipeline using Prometheus and Grafana.
+
+The purpose of this layer is not just to show graphs. It gives operational visibility into the serving API, Kafka topics, DLQ flow, PostgreSQL feature-serving table, and feature freshness.
+
+### Monitoring stack
+
+| Component | Port | Purpose |
+|---|---:|---|
+| FastAPI `/metrics` | `8000` | Exposes API request count and latency metrics |
+| Kafka Exporter | `9308` | Exposes Kafka topic offsets, topic activity, and consumer-group lag when offsets are committed |
+| Feature Freshness Exporter | `8001` | Queries PostgreSQL and exposes serving-table health metrics |
+| Prometheus | `9090` | Scrapes FastAPI, Kafka exporter, and feature freshness exporter |
+| Grafana | `3000` | Visualizes API, Kafka, DLQ, PostgreSQL, and freshness metrics |
+
+### Metrics covered
+
+| Metric area | What it tells us |
+|---|---|
+| FastAPI request throughput | Whether the feature-serving API is receiving traffic |
+| FastAPI p95 latency | Whether API responses are staying fast enough for serving use cases |
+| Kafka `user_events` offset | Whether user event data is entering Kafka |
+| Kafka `user_events` throughput | Whether the main event stream is actively moving |
+| Kafka `user_events_dlq` offset | Whether bad records are reaching the DLQ topic |
+| Kafka DLQ ingress rate | Whether bad-record volume is increasing |
+| Kafka consumer-group lag | Visible only when consumers commit offsets to Kafka |
+| PostgreSQL `user_features` row count | Whether the serving database has feature rows available |
+| Feature freshness seconds | How stale or fresh the served features are |
+| Prometheus target health | Whether Prometheus can scrape all configured targets |
+| Grafana dashboard health | Whether the observability dashboard is available |
+
+### Important note on Spark consumer lag
+
+Kafka exporter reports consumer-group lag only when a consumer commits offsets back to Kafka.
+
+Spark Structured Streaming commonly stores offsets in checkpoint files instead of committing them to Kafka as a normal consumer group. Because of that, the Grafana Kafka consumer-group lag panel may show `No data`.
+
+That does not automatically mean the pipeline is broken.
+
+For this project, feature freshness is the more reliable signal for the Spark-to-serving path because it tells us how old the latest feature data is inside PostgreSQL.
+
+### Start required base services
+
+Start Kafka and PostgreSQL:
+
+```bash
+docker start kafka postgres

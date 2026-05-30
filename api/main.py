@@ -1,12 +1,17 @@
 from fastapi import FastAPI, HTTPException
 import psycopg
 from psycopg.rows import dict_row
+from prometheus_fastapi_instrumentator import Instrumentator
 
 app = FastAPI(
     title="Real-Time Personalization Feature API",
     description="Serves user-level personalization features from PostgreSQL",
     version="1.0.0"
 )
+
+# Prometheus metrics endpoint: /metrics
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
 
 DB_CONFIG = {
     "host": "localhost",

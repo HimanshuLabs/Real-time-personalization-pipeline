@@ -1,0 +1,127 @@
+{
+  "uid": "project1-observability",
+  "title": "Project 1 - Real-Time Personalization Observability",
+  "tags": ["project1", "kafka", "fastapi", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "FastAPI Requests / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m]))",
+          "legendFormat": "req/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "FastAPI p95 Latency",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Feature Freshness",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_feature_freshness_seconds",
+          "legendFormat": "freshness"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "PostgreSQL user_features Rows",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_user_features_rows",
+          "legendFormat": "rows"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Kafka user_events Throughput",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"user_events\"}[1m]))",
+          "legendFormat": "user_events msg/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Kafka DLQ Ingress Rate",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"user_events_dlq\"}[1m]))",
+          "legendFormat": "dlq msg/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Kafka Consumer Group Lag",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(kafka_consumergroup_lag) by (consumergroup, topic)",
+          "legendFormat": "{{consumergroup}} / {{topic}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Feature Freshness Over Time",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_feature_freshness_seconds",
+          "legendFormat": "freshness seconds"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    }
+  ]
+}
