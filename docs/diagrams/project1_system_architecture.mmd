@@ -1,10 +1,11 @@
 flowchart LR
     %% Project 1 — Real-Time Personalization Pipeline
+    %% Updated after Step 11 GitHub Actions CI/CD and Step 12 Prometheus + Grafana Monitoring
 
     subgraph SRC["1. Sources"]
-        GEN["Python Event Generator<br/>Synthetic clickstream events"]
-        USERDIM["User Reference Data<br/>segment, city, device preference"]
-        PRODDIM["Product Reference Data<br/>category, brand, price"]
+        GEN["Python Event Generator<br/>Synthetic ecommerce clickstream telemetry"]
+        USERDIM["User Reference Data<br/>user_id, segment, city, device preference"]
+        PRODDIM["Product Reference Data<br/>product_id, category, brand, price"]
     end
 
     subgraph KAFKA["2. Kafka Ingestion"]
@@ -14,61 +15,78 @@ flowchart LR
 
     subgraph STREAM["3. Spark Structured Streaming"]
         READ["Read Kafka Stream<br/>topic, partition, offset"]
-        PARSE["Parse JSON Payload"]
+        PARSE["Parse JSON Payload<br/>typed schema"]
         VALIDATE{"Valid Event?"}
-        NORMALIZE["Normalize Schema"]
-        EVENTTIME["Event-Time Processing<br/>watermarking"]
-        DEDUP["Deduplicate<br/>by event_id"]
-        BRONZEWRITE["Write Valid Events<br/>to Bronze"]
+        NORMALIZE["Schema Normalization<br/>canonical event structure"]
+        EVENTTIME["Event-Time Processing<br/>timestamp parsing + watermarking"]
+        DEDUP["Deduplication<br/>event_id based"]
+        ENRICH["Reference Data Enrichment<br/>user + product joins"]
+        BRONZEWRITE["Write Valid Events<br/>to Bronze Parquet"]
     end
 
-    subgraph LAKE["4. Lakehouse Storage"]
-        BRONZE["Bronze Layer<br/>raw valid events"]
-        SILVER["Silver Layer<br/>cleaned + enriched events"]
-        GOLD["Gold Layer<br/>user feature aggregates"]
+    subgraph LAKE["4. Medallion Lakehouse Storage"]
+        BRONZE["Bronze Layer<br/>raw valid streaming events"]
+        SILVER["Silver Layer<br/>cleaned + deduplicated + enriched events"]
+        GOLD["Gold Layer<br/>user-level recommendation features"]
     end
 
-    subgraph BATCH["5. Airflow-Orchestrated Batch Pipeline"]
-        AIRFLOW["Apache Airflow DAG"]
-        B2S["Spark Job<br/>Bronze to Silver"]
-        S2G["Spark Job<br/>Silver to Gold"]
-        G2P["Spark Job<br/>Gold to PostgreSQL"]
+    subgraph ORCH["5. Airflow Orchestration"]
+        AIRFLOW["Apache Airflow DAG<br/>project1_personalization_pipeline"]
+        B2S["Spark Batch Job<br/>Bronze to Silver"]
+        S2G["Spark Batch Job<br/>Silver to Gold"]
+        G2P["Spark JDBC Job<br/>Gold to PostgreSQL"]
+        PGVERIFY["PostgreSQL Verification<br/>row-count validation"]
     end
 
     subgraph SERVE["6. Feature Serving Layer"]
         PG["PostgreSQL<br/>user_features table"]
         API["FastAPI Service<br/>/health<br/>/features/{user_id}"]
-        CLIENT["Client / Recruiter Demo<br/>curl or browser"]
+        CLIENT["Client / Demo Consumer<br/>browser, curl, Swagger UI"]
     end
 
-    subgraph OPS["7. Production-Style Controls"]
-        CHECKPOINT["Spark Checkpoints"]
+    subgraph CICD["7. CI/CD Layer"]
+        GITHUB["GitHub Repository"]
+        ACTIONS["GitHub Actions<br/>CI/CD Validation Pipeline"]
+        LINT["Validation Checks<br/>syntax + project structure"]
+    end
+
+    subgraph OBS["8. Observability Layer"]
+        PROM["Prometheus<br/>metrics scraping"]
+        GRAFANA["Grafana<br/>monitoring dashboards"]
+        METRICS["Runtime Metrics<br/>API health, pipeline visibility, service readiness"]
+    end
+
+    subgraph REL["9. Reliability Controls"]
+        CHECKPOINT["Spark Checkpoints<br/>stream recovery"]
         REPLAY["Replay Strategy<br/>Kafka offsets + DLQ replay"]
-        QUALITY["Data Quality Checks<br/>Silver / Gold validation"]
-        CICD["GitHub Actions<br/>planned CI/CD"]
-        MONITOR["Prometheus + Grafana<br/>planned monitoring"]
+        QUALITY["Data Quality Gates<br/>Silver / Gold validation"]
     end
 
+    %% Main streaming flow
     GEN --> TOPIC
 
     TOPIC --> READ
     READ --> PARSE
     PARSE --> VALIDATE
 
-    VALIDATE -- "No: malformed / invalid" --> DLQ
-    VALIDATE -- "Yes" --> NORMALIZE
+    VALIDATE -- "Invalid / malformed" --> DLQ
+    VALIDATE -- "Valid" --> NORMALIZE
 
     NORMALIZE --> EVENTTIME
     EVENTTIME --> DEDUP
-    DEDUP --> BRONZEWRITE
+    DEDUP --> ENRICH
+
+    USERDIM --> ENRICH
+    PRODDIM --> ENRICH
+
+    ENRICH --> BRONZEWRITE
     BRONZEWRITE --> BRONZE
 
-    USERDIM --> B2S
-    PRODDIM --> B2S
-
+    %% Batch / medallion flow
     AIRFLOW --> B2S
     AIRFLOW --> S2G
     AIRFLOW --> G2P
+    AIRFLOW --> PGVERIFY
 
     BRONZE --> B2S
     B2S --> SILVER
@@ -76,14 +94,26 @@ flowchart LR
     S2G --> GOLD
     GOLD --> G2P
     G2P --> PG
+    PG --> PGVERIFY
 
+    %% Serving flow
     PG --> API
     API --> CLIENT
 
-    STREAM -. uses .-> CHECKPOINT
-    DLQ -. supports .-> REPLAY
-    BRONZE -. supports .-> REPLAY
-    SILVER -. validated by .-> QUALITY
-    GOLD -. validated by .-> QUALITY
-    API -. future metrics .-> MONITOR
-    AIRFLOW -. future validation .-> CICD
+    %% CI/CD flow
+    GITHUB --> ACTIONS
+    ACTIONS --> LINT
+
+    %% Observability flow
+    API --> PROM
+    PROM --> GRAFANA
+    PROM --> METRICS
+    GRAFANA --> METRICS
+
+    %% Reliability / quality links
+    STREAM -. "uses" .-> CHECKPOINT
+    DLQ -. "supports bad-record isolation" .-> REPLAY
+    TOPIC -. "supports offset replay" .-> REPLAY
+    SILVER -. "validated by" .-> QUALITY
+    GOLD -. "validated by" .-> QUALITY
+    AIRFLOW -. "orchestrates validation gates" .-> QUALITY
