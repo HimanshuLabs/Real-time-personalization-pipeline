@@ -1,16 +1,25 @@
 import json
+import os
 import random
+import sys
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 
 from faker import Faker
 from confluent_kafka import Producer
 
 fake = Faker()
 
-producer = Producer({
-    "bootstrap.servers": "localhost:9092"
-})
+# Separate instance for profiles; reseeding it never touches `fake`,
+# so event_id/session_id UUIDs stay unique.
+profile_fake = Faker()
+
+NUM_USERS = int(os.environ.get("NUM_USERS", "5000"))
+
+FLUSH_TIMEOUT_SECONDS = 10
+
+delivery_stats = {"delivered": 0, "failed": 0}
 
 
 EVENT_TYPES = [
@@ -87,7 +96,33 @@ PRODUCTS = {
         "dumbbells",
         "yoga_mat",
         "cricket_bat"
+    ],
+
+    "books": [
+        "atomic_habits",
+        "sapiens",
+        "python_crash_course"
+    ],
+
+    "grocery": [
+        "basmati_rice",
+        "olive_oil",
+        "green_tea"
+    ],
+
+    "toys": [
+        "lego_set",
+        "rubiks_cube",
+        "rc_car"
     ]
+}
+
+# Stable id per product: sorted names -> 10000 + index, built once.
+PRODUCT_IDS = {
+    name: 10000 + index
+    for index, name in enumerate(
+        sorted(name for names in PRODUCTS.values() for name in names)
+    )
 }
 
 USER_SEGMENTS = [
@@ -202,12 +237,38 @@ def weighted_event():
     )[0]
 
 
+@lru_cache(maxsize=None)
+def get_user_profile(user_id):
+
+    rng = random.Random(user_id)
+
+    profile_fake.seed_instance(user_id)
+
+    return {
+        "user_name": profile_fake.name(),
+        "email": profile_fake.email(),
+        "gender": rng.choice(["male", "female", "other"]),
+        "age": rng.randint(18, 65),
+        "membership_tier": rng.choice(["free", "plus", "premium"]),
+        "loyalty_points": rng.randint(0, 50000),
+        "preferred_language": rng.choice(["english", "hindi", "telugu", "tamil", "kannada"]),
+        "home_city": profile_fake.city(),
+        "home_state": profile_fake.state(),
+        "user_segment": rng.choice(USER_SEGMENTS),
+        "is_prime_user": rng.choice([True, False]),
+    }
+
+
 def generate_event():
+
+    user_id = random.randint(1, NUM_USERS)
+
+    profile = get_user_profile(user_id)
 
     category = random.choice(PRODUCT_CATEGORIES)
 
     product_name = random.choice(
-        PRODUCTS.get(category, ["unknown"])
+        PRODUCTS[category]
     )
 
     event_type = weighted_event()
@@ -290,19 +351,17 @@ def generate_event():
 
         "session_id": fake.uuid4(),
 
-        "user_id": random.randint(
-            1,
-            1000000
-        ),
-        "user_name": fake.name(),
-"email": fake.email(),
-"gender": random.choice(["male", "female", "other"]),
-"age": random.randint(18, 65),
-"membership_tier": random.choice(["free", "plus", "premium"]),
-"loyalty_points": random.randint(0, 50000),
-"preferred_language": random.choice(["english", "hindi", "telugu", "tamil", "kannada"]),
-"home_city": fake.city(),
-"home_state": fake.state(),
+        "user_id": user_id,
+
+        "user_name": profile["user_name"],
+        "email": profile["email"],
+        "gender": profile["gender"],
+        "age": profile["age"],
+        "membership_tier": profile["membership_tier"],
+        "loyalty_points": profile["loyalty_points"],
+        "preferred_language": profile["preferred_language"],
+        "home_city": profile["home_city"],
+        "home_state": profile["home_state"],
 
 
         "event_time": datetime.now(
@@ -315,13 +374,13 @@ def generate_event():
             random.choice(USER_JOURNEY_STAGES),
 
         "user_segment":
-            random.choice(USER_SEGMENTS),
+            profile["user_segment"],
 
         "is_prime_user":
-            random.choice([True, False]),
+            profile["is_prime_user"],
 
         "product_id":
-            random.randint(10000, 99999),
+            PRODUCT_IDS[product_name],
 
         "product_name":
             product_name,
@@ -446,24 +505,83 @@ def generate_event():
     }
 
 
-while True:
+def on_delivery(err, msg):
 
-    event = generate_event()
-
-    producer.produce(
-        "user_events",
-        value=json.dumps(event).encode("utf-8")
-    )
-
-    producer.flush()
-
-    print(
-        json.dumps(
-            event,
-            indent=2
+    if err is not None:
+        delivery_stats["failed"] += 1
+        print(
+            f"[producer] delivery failed: topic={msg.topic()} error={err}",
+            file=sys.stderr,
+            flush=True
         )
-    )
+    else:
+        delivery_stats["delivered"] += 1
 
-    time.sleep(
-        random.uniform(0.05, 1.5)
-    )
+
+def produce_event(producer, event):
+
+    value = json.dumps(event).encode("utf-8")
+
+    # Keyed by user_id so each user's events stay in order on one partition.
+    key = str(event["user_id"])
+
+    try:
+        producer.produce(
+            "user_events",
+            key=key,
+            value=value,
+            on_delivery=on_delivery
+        )
+    except BufferError:
+        # Local queue full: serve callbacks for up to 1s, then retry once.
+        producer.poll(1)
+        producer.produce(
+            "user_events",
+            key=key,
+            value=value,
+            on_delivery=on_delivery
+        )
+
+    # Serve delivery callbacks without blocking.
+    producer.poll(0)
+
+
+def main():
+
+    producer = Producer({
+        "bootstrap.servers": "localhost:9092"
+    })
+
+    try:
+        while True:
+
+            event = generate_event()
+
+            produce_event(producer, event)
+
+            print(
+                json.dumps(
+                    event,
+                    indent=2
+                )
+            )
+
+            time.sleep(
+                random.uniform(0.05, 1.5)
+            )
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        undelivered = producer.flush(FLUSH_TIMEOUT_SECONDS)
+        print(
+            f"[producer] summary: delivered={delivery_stats['delivered']} "
+            f"failed={delivery_stats['failed']} undelivered={undelivered}",
+            file=sys.stderr,
+            flush=True
+        )
+
+
+if __name__ == "__main__":
+    main()
