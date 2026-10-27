@@ -1,8 +1,11 @@
 # Python
 __pycache__/
 *.pyc
-venv/
+# venv, venv-airflow, venv_broken_*, data-generator/venv
+venv*/
 .venv/
+.pytest_cache/
+.ruff_cache/
 
 # Logs
 logs/
@@ -26,9 +29,6 @@ webserver_config.py
 
 # Local temporary shell files
 tmp*.sh
-
-# Runtime logs
-logs/
 
 # Monitoring runtime data
 monitoring/**/data/
