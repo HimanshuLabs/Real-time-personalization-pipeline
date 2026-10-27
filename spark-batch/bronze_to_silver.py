@@ -21,6 +21,7 @@ def require_path(path: str, message: str) -> None:
 spark = (
     SparkSession.builder
     .appName("BronzeToSilverEnrichedEvents")
+    .config("spark.sql.session.timeZone", "UTC")
     .getOrCreate()
 )
 
@@ -83,8 +84,8 @@ if "event_id" in df.columns:
 # This makes the job safe to rerun and prevents ambiguous column names.
 # ---------------------------------------------------------------------
 
+# user_segment is not here: Silver keeps the event's own value (F05).
 existing_enrichment_columns = [
-    "user_segment",
     "user_city",
     "device_preference",
     "signup_date",
@@ -107,9 +108,11 @@ for column_name in existing_enrichment_columns:
 # USER ENRICHMENT
 # ---------------------------------------------------------------------
 
+if "user_segment" not in df.columns:
+    df = df.withColumn("user_segment", lit(None).cast("string"))
+
 users_dim = users_dim.select(
     "user_id",
-    "user_segment",
     "user_city",
     "device_preference",
     "signup_date",
@@ -186,7 +189,7 @@ if "reference_product_id" not in df.columns:
 
 df = (
     df
-    .withColumn("is_user_reference_missing", col("user_segment").isNull())
+    .withColumn("is_user_reference_missing", col("user_city").isNull())
     .withColumn("is_product_reference_missing", col("product_category").isNull())
 )
 

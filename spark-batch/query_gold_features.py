@@ -3,6 +3,7 @@ from pyspark.sql import SparkSession
 spark = (
     SparkSession.builder
     .appName("QueryGoldUserFeatures")
+    .config("spark.sql.session.timeZone", "UTC")
     .getOrCreate()
 )
 
