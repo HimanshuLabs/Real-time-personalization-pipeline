@@ -43,8 +43,8 @@ def event(event_id, user_id, event_type, event_time, **overrides):
     return row
 
 
-# User 1's name and tier change between events, the way the pre-F03 producer
-# behaved; Gold must still give one row with the latest values.
+# User 1's name and tier change between events;
+# Gold must still give one row with the latest values.
 BRONZE_EVENTS = [
     event("u1-view-1", 1, "home_page_view", "2026-10-25T10:00:00+00:00",
           user_name="Old Name", membership_tier="free"),

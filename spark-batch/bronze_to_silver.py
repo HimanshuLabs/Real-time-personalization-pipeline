@@ -84,7 +84,7 @@ if "event_id" in df.columns:
 # This makes the job safe to rerun and prevents ambiguous column names.
 # ---------------------------------------------------------------------
 
-# user_segment is not here: Silver keeps the event's own value (F05).
+# user_segment is not here: Silver keeps the event's own value.
 existing_enrichment_columns = [
     "user_city",
     "device_preference",
