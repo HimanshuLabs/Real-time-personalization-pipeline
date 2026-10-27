@@ -1,119 +1,63 @@
 flowchart LR
-    %% Project 1 — Real-Time Personalization Pipeline
-    %% Updated after Step 11 GitHub Actions CI/CD and Step 12 Prometheus + Grafana Monitoring
+    %% Streaming ingestion -> batch feature computation -> API serving
 
-    subgraph SRC["1. Sources"]
-        GEN["Python Event Generator<br/>Synthetic ecommerce clickstream telemetry"]
-        USERDIM["User Reference Data<br/>user_id, segment, city, device preference"]
-        PRODDIM["Product Reference Data<br/>product_id, category, brand, price"]
+    subgraph SRC["Event source"]
+        GEN["data-generator/producer.py<br/>synthetic events, schema 4.0<br/>stable profile per user_id"]
     end
 
-    subgraph KAFKA["2. Kafka Ingestion"]
-        TOPIC["Kafka Topic<br/>user_events"]
-        DLQ["Kafka DLQ Topic<br/>user_events_dlq"]
+    subgraph KAFKA["Kafka (single broker)"]
+        TOPIC["user_events<br/>3 partitions, key = user_id"]
+        DLQ["user_events_dlq<br/>raw JSON of rejected events"]
     end
 
-    subgraph STREAM["3. Spark Structured Streaming"]
-        READ["Read Kafka Stream<br/>topic, partition, offset"]
-        PARSE["Parse JSON Payload<br/>typed schema"]
-        VALIDATE{"Valid Event?"}
-        NORMALIZE["Schema Normalization<br/>canonical event structure"]
-        EVENTTIME["Event-Time Processing<br/>timestamp parsing + watermarking"]
-        DEDUP["Deduplication<br/>event_id based"]
-        ENRICH["Reference Data Enrichment<br/>user + product joins"]
-        BRONZEWRITE["Write Valid Events<br/>to Bronze Parquet"]
+    subgraph STREAM["Streaming ingestion: spark-streaming/read_stream.py"]
+        PARSE["Parse JSON with typed schema<br/>try_to_timestamp(event_time)"]
+        VALIDATE{"is_valid<br/>required fields + value rules,<br/>NULL counts as invalid"}
+        CKPT[("checkpoints/<br/>bronze_user_events, dlq")]
     end
 
-    subgraph LAKE["4. Medallion Lakehouse Storage"]
-        BRONZE["Bronze Layer<br/>raw valid streaming events"]
-        SILVER["Silver Layer<br/>cleaned + deduplicated + enriched events"]
-        GOLD["Gold Layer<br/>user-level recommendation features"]
+    subgraph LAKE["Parquet storage (data/)"]
+        BRONZE[("Bronze<br/>data/bronze/user_events<br/>valid events, duplicates kept")]
+        DIMS[("Reference dims<br/>data/dim/users, data/dim/products")]
+        SILVER[("Silver<br/>data/silver/user_events")]
+        GOLD[("Gold<br/>data/gold/user_features<br/>one row per user")]
     end
 
-    subgraph ORCH["5. Airflow Orchestration"]
-        AIRFLOW["Apache Airflow DAG<br/>project1_personalization_pipeline"]
-        B2S["Spark Batch Job<br/>Bronze to Silver"]
-        S2G["Spark Batch Job<br/>Silver to Gold"]
-        G2P["Spark JDBC Job<br/>Gold to PostgreSQL"]
-        PGVERIFY["PostgreSQL Verification<br/>row-count validation"]
+    subgraph BATCH["Batch feature computation (manual or Airflow DAG)"]
+        REF["reference-data/create_reference_data.py<br/>dims from the producer catalog and profiles"]
+        B2S["spark-batch/bronze_to_silver.py<br/>dedup by event_id, left-join dims,<br/>reference-missing flags"]
+        S2G["spark-batch/silver_to_gold.py<br/>GROUP BY user_id"]
+        PUB["spark-batch/publish_gold_to_postgres.py<br/>JDBC to staging, validate,<br/>swap in one transaction"]
     end
 
-    subgraph SERVE["6. Feature Serving Layer"]
-        PG["PostgreSQL<br/>user_features table"]
-        API["FastAPI Service<br/>/health<br/>/features/{user_id}"]
-        CLIENT["Client / Demo Consumer<br/>browser, curl, Swagger UI"]
+    subgraph SERVE["Serving"]
+        PG[("PostgreSQL<br/>user_features<br/>PRIMARY KEY (user_id)")]
+        API["FastAPI api/main.py<br/>/health, /features/{user_id}, /metrics"]
     end
 
-    subgraph CICD["7. CI/CD Layer"]
-        GITHUB["GitHub Repository"]
-        ACTIONS["GitHub Actions<br/>CI/CD Validation Pipeline"]
-        LINT["Validation Checks<br/>syntax + project structure"]
+    subgraph OBS["Monitoring: monitoring/run_monitoring.sh"]
+        KEXP["kafka-exporter :9308"]
+        FEXP["feature-freshness-exporter :8001"]
+        PROM["Prometheus :9090"]
+        GRAF["Grafana :3000"]
     end
 
-    subgraph OBS["8. Observability Layer"]
-        PROM["Prometheus<br/>metrics scraping"]
-        GRAFANA["Grafana<br/>monitoring dashboards"]
-        METRICS["Runtime Metrics<br/>API health, pipeline visibility, service readiness"]
-    end
+    GEN -- "key = user_id" --> TOPIC
+    TOPIC --> PARSE --> VALIDATE
+    VALIDATE -- "valid" --> BRONZE
+    VALIDATE -- "invalid" --> DLQ
+    STREAM -. "offsets" .-> CKPT
 
-    subgraph REL["9. Reliability Controls"]
-        CHECKPOINT["Spark Checkpoints<br/>stream recovery"]
-        REPLAY["Replay Strategy<br/>Kafka offsets + DLQ replay"]
-        QUALITY["Data Quality Gates<br/>Silver / Gold validation"]
-    end
-
-    %% Main streaming flow
-    GEN --> TOPIC
-
-    TOPIC --> READ
-    READ --> PARSE
-    PARSE --> VALIDATE
-
-    VALIDATE -- "Invalid / malformed" --> DLQ
-    VALIDATE -- "Valid" --> NORMALIZE
-
-    NORMALIZE --> EVENTTIME
-    EVENTTIME --> DEDUP
-    DEDUP --> ENRICH
-
-    USERDIM --> ENRICH
-    PRODDIM --> ENRICH
-
-    ENRICH --> BRONZEWRITE
-    BRONZEWRITE --> BRONZE
-
-    %% Batch / medallion flow
-    AIRFLOW --> B2S
-    AIRFLOW --> S2G
-    AIRFLOW --> G2P
-    AIRFLOW --> PGVERIFY
-
+    REF --> DIMS
     BRONZE --> B2S
-    B2S --> SILVER
-    SILVER --> S2G
-    S2G --> GOLD
-    GOLD --> G2P
-    G2P --> PG
-    PG --> PGVERIFY
-
-    %% Serving flow
+    DIMS --> B2S
+    B2S --> SILVER --> S2G --> GOLD --> PUB --> PG
     PG --> API
-    API --> CLIENT
 
-    %% CI/CD flow
-    GITHUB --> ACTIONS
-    ACTIONS --> LINT
-
-    %% Observability flow
-    API --> PROM
-    PROM --> GRAFANA
-    PROM --> METRICS
-    GRAFANA --> METRICS
-
-    %% Reliability / quality links
-    STREAM -. "uses" .-> CHECKPOINT
-    DLQ -. "supports bad-record isolation" .-> REPLAY
-    TOPIC -. "supports offset replay" .-> REPLAY
-    SILVER -. "validated by" .-> QUALITY
-    GOLD -. "validated by" .-> QUALITY
-    AIRFLOW -. "orchestrates validation gates" .-> QUALITY
+    TOPIC -.-> KEXP
+    DLQ -.-> KEXP
+    PG -.-> FEXP
+    API -. "/metrics" .-> PROM
+    KEXP -.-> PROM
+    FEXP -.-> PROM
+    PROM --> GRAF
