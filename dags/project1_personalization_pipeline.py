@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import os
 from datetime import timedelta
+from pathlib import Path
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG, literal
 
 
-PROJECT_ROOT = "/home/manshu/Desktop/Project-1- Real time suggestions"
+PROJECT_ROOT = os.environ.get(
+    "PROJECT1_ROOT",
+    str(Path(__file__).resolve().parents[1]),
+)
 
 DEFAULT_ARGS = {
     "depends_on_past": False,
@@ -22,6 +27,8 @@ with DAG(
     start_date=pendulum.datetime(2026, 5, 29, tz="Asia/Kolkata"),
     schedule="@daily",
     catchup=False,
+    # Every task overwrites shared Silver/Gold/Postgres outputs.
+    max_active_runs=1,
     default_args=DEFAULT_ARGS,
     tags=["project1", "spark", "lakehouse", "feature-store"],
 ) as dag:
@@ -44,6 +51,21 @@ with DAG(
             fi
 
             echo "Bronze layer exists with $FILE_COUNT parquet file(s)."
+            """
+        ),
+    )
+
+    create_reference_data = BashOperator(
+        task_id="create_reference_data",
+        cwd=PROJECT_ROOT,
+        bash_command=literal(
+            """
+            set -euo pipefail
+
+            echo "Creating reference user/product dimensions..."
+            spark-submit reference-data/create_reference_data.py
+
+            echo "Reference data completed."
             """
         ),
     )
@@ -147,15 +169,17 @@ with DAG(
             echo "Verifying PostgreSQL user_features table..."
 
             python - <<'PY'
+import os
+
 import psycopg
 from psycopg.rows import dict_row
 
 conn = psycopg.connect(
-    host="localhost",
-    port=5433,
-    dbname="personalization_db",
-    user="de_user",
-    password="de_password",
+    host=os.environ.get("POSTGRES_HOST", "localhost"),
+    port=int(os.environ.get("POSTGRES_PORT", "5433")),
+    dbname=os.environ.get("POSTGRES_DB", "personalization_db"),
+    user=os.environ.get("POSTGRES_USER", "de_user"),
+    password=os.environ.get("POSTGRES_PASSWORD", "de_password"),
     row_factory=dict_row,
 )
 
@@ -178,6 +202,7 @@ PY
 
     (
         verify_bronze_exists
+        >> create_reference_data
         >> bronze_to_silver
         >> verify_silver_exists
         >> silver_to_gold
