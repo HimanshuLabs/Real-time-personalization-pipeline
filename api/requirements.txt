@@ -1,5 +1,5 @@
 fastapi==0.115.6
 uvicorn==0.34.0
-psycopg[binary]
-prometheus-fastapi-instrumentator
-prometheus-client
+psycopg[binary]==3.3.4
+prometheus-fastapi-instrumentator==7.1.0
+prometheus-client==0.25.0

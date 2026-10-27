@@ -1,7 +1,12 @@
+import logging
+import os
+
 from fastapi import FastAPI, HTTPException
 import psycopg
 from psycopg.rows import dict_row
 from prometheus_fastapi_instrumentator import Instrumentator
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Real-Time Personalization Feature API",
@@ -14,11 +19,11 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_sch
 
 
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5433,
-    "dbname": "personalization_db",
-    "user": "de_user",
-    "password": "de_password"
+    "host": os.environ.get("POSTGRES_HOST", "localhost"),
+    "port": int(os.environ.get("POSTGRES_PORT", "5433")),
+    "dbname": os.environ.get("POSTGRES_DB", "personalization_db"),
+    "user": os.environ.get("POSTGRES_USER", "de_user"),
+    "password": os.environ.get("POSTGRES_PASSWORD", "de_password")
 }
 
 
@@ -43,17 +48,41 @@ def root():
 
 @app.get("/health")
 def health_check():
+    # Healthy only if the DB connects and user_features exists with rows.
+    # Error details are logged server-side, never returned to the client.
+    reason = None
+
     try:
-        with get_db_connection():
-            return {
-                "status": "healthy",
-                "postgres": "connected"
-            }
-    except Exception as error:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT to_regclass('user_features') IS NOT NULL AS table_exists"
+                )
+
+                if not cursor.fetchone()["table_exists"]:
+                    reason = "user_features missing"
+                else:
+                    cursor.execute(
+                        "SELECT EXISTS (SELECT 1 FROM user_features) AS has_rows"
+                    )
+
+                    if not cursor.fetchone()["has_rows"]:
+                        reason = "user_features empty"
+
+    except Exception:
+        logger.exception("Health check failed: PostgreSQL unavailable")
+        reason = "database unavailable"
+
+    if reason is not None:
         raise HTTPException(
-            status_code=500,
-            detail=f"PostgreSQL connection failed: {str(error)}"
+            status_code=503,
+            detail=reason
         )
+
+    return {
+        "status": "healthy",
+        "postgres": "connected"
+    }
 
 
 @app.get("/features/{user_id}")
@@ -74,7 +103,9 @@ def get_user_features(user_id: int):
                         avg_event_price,
                         max_event_price,
                         last_event_timestamp,
-                        unique_products_interacted
+                        unique_products_interacted,
+                        avg_engagement_score,
+                        avg_purchase_probability
                     FROM user_features
                     WHERE user_id = %s
                     """,
@@ -97,8 +128,9 @@ def get_user_features(user_id: int):
     except HTTPException:
         raise
 
-    except Exception as error:
+    except Exception:
+        logger.exception("Feature lookup failed for user_id=%s", user_id)
         raise HTTPException(
             status_code=500,
-            detail=f"Feature lookup failed: {str(error)}"
+            detail="Feature lookup failed"
         )

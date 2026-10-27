@@ -35,6 +35,14 @@ feature_freshness_seconds = Gauge(
 )
 
 
+def mark_down() -> None:
+    # NaN instead of the last good values, so a dead DB never looks fresh.
+    exporter_up.set(0)
+    user_features_rows.set(float("nan"))
+    latest_feature_event_timestamp_unix.set(float("nan"))
+    feature_freshness_seconds.set(float("nan"))
+
+
 def collect_metrics() -> None:
     try:
         with psycopg.connect(
@@ -68,7 +76,7 @@ def collect_metrics() -> None:
         exporter_up.set(1)
 
     except Exception as exc:
-        exporter_up.set(0)
+        mark_down()
         print(f"[feature-exporter] PostgreSQL scrape failed: {exc}", flush=True)
 
 

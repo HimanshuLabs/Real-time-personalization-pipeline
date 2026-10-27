@@ -1,2 +1,5 @@
 apache-airflow==3.2.2
 apache-airflow-providers-standard
+psycopg[binary]==3.3.4
+confluent-kafka==2.14.2
+faker==25.8.0

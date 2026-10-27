@@ -4,6 +4,14 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "[monitoring] Project root: ${PROJECT_ROOT}"
+
+GRAFANA_PASSWORD_GENERATED=false
+if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
+  # head reads a fixed amount first, so no SIGPIPE under pipefail.
+  GRAFANA_ADMIN_PASSWORD="$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24)"
+  GRAFANA_PASSWORD_GENERATED=true
+fi
+
 echo "[monitoring] Using Docker host network for Linux reliability."
 
 echo "[monitoring] Removing old monitoring containers..."
@@ -27,7 +35,7 @@ echo "[monitoring] Starting Kafka exporter..."
 docker run -d \
   --name kafka-exporter \
   --network host \
-  danielqsj/kafka-exporter:latest \
+  danielqsj/kafka-exporter:v1.10.0 \
   --kafka.server=localhost:9092 \
   --web.listen-address=:9308
 
@@ -48,7 +56,7 @@ docker run -d \
   --name prometheus \
   --network host \
   -v "${PROJECT_ROOT}/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-  prom/prometheus:latest \
+  prom/prometheus:v3.5.4 \
   --config.file=/etc/prometheus/prometheus.yml
 
 echo "[monitoring] Starting Grafana..."
@@ -56,10 +64,10 @@ docker run -d \
   --name grafana \
   --network host \
   -e GF_SECURITY_ADMIN_USER=admin \
-  -e GF_SECURITY_ADMIN_PASSWORD=admin \
+  -e GF_SECURITY_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD}" \
   -v "${PROJECT_ROOT}/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro" \
   -v "${PROJECT_ROOT}/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
-  grafana/grafana-oss:latest
+  grafana/grafana-oss:13.0.2
 
 
 echo
@@ -68,6 +76,10 @@ for i in {1..30}; do
   if curl -fsS http://127.0.0.1:9090/-/ready >/dev/null 2>&1; then
     echo "[monitoring] Prometheus is ready."
     break
+  fi
+  if [ "${i}" -eq 30 ]; then
+    echo "[monitoring] Prometheus not ready after 30 attempts." >&2
+    exit 1
   fi
   echo "[monitoring] Prometheus not ready yet... attempt ${i}/30"
   sleep 2
@@ -80,24 +92,33 @@ for i in {1..45}; do
     echo "[monitoring] Grafana is ready."
     break
   fi
+  if [ "${i}" -eq 45 ]; then
+    echo "[monitoring] Grafana not ready after 45 attempts." >&2
+    exit 1
+  fi
   echo "[monitoring] Grafana not ready yet... attempt ${i}/45"
   sleep 2
 done
 
 echo
 echo "[monitoring] Final health check:"
-curl -fsS http://127.0.0.1:9090/-/ready || true
+curl -fsS http://127.0.0.1:9090/-/ready
 echo
-curl -fsS http://127.0.0.1:3000/api/health || true
+curl -fsS http://127.0.0.1:3000/api/health
 echo
 
 echo
 echo "[monitoring] Started."
 echo "Prometheus: http://127.0.0.1:9090"
 echo "Grafana:    http://127.0.0.1:3000"
-echo "Grafana login: admin / admin"
+if [ "${GRAFANA_PASSWORD_GENERATED}" = true ]; then
+  echo "Grafana login: admin / ${GRAFANA_ADMIN_PASSWORD}"
+  echo "(generated; set GRAFANA_ADMIN_PASSWORD to choose your own)"
+else
+  echo "Grafana login: admin / (value of GRAFANA_ADMIN_PASSWORD)"
+fi
 echo
 echo "Required:"
-echo "- FastAPI running on 0.0.0.0:8000"
+echo "- FastAPI running on 127.0.0.1:8000"
 echo "- Kafka running on localhost:9092"
 echo "- PostgreSQL running on localhost:5433"
