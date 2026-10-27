@@ -3,8 +3,10 @@ services:
     image: apache/kafka:4.1.2
     container_name: kafka
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     environment:
+      # Pinned to the image default so persisted log dirs keep matching.
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
@@ -16,6 +18,11 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      # Default is /tmp/kafka-logs inside the container; keep it on the volume.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
 
 
@@ -23,7 +30,7 @@ services:
     image: postgres:16
     container_name: postgres
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_USER: de_user
       POSTGRES_PASSWORD: de_password
@@ -32,6 +39,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
 volumes:
+  kafka_data:
   postgres_data:
 
 
