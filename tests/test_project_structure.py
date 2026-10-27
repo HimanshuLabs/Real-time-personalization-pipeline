@@ -1,4 +1,9 @@
+import ast
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,13 +29,48 @@ def test_required_project_files_exist():
     assert not missing, f"Missing required project files: {missing}"
 
 
-def test_runtime_folders_are_not_required_for_ci():
-    runtime_paths = [
-        "data",
-        "logs",
-        "checkpoints",
-        "airflow_home",
-    ]
+IGNORED_RUNTIME_PATHS = [
+    "venv/",
+    "venv-airflow/",
+    "data/",
+    "checkpoints/",
+    "logs/",
+    "airflow_home/",
+]
 
-    for path in runtime_paths:
-        assert isinstance(path, str)
+
+def test_runtime_folders_are_gitignored():
+    if shutil.which("git") is None or not (ROOT / ".git").exists():
+        pytest.skip("git or the .git directory is not available")
+
+    # --no-index: judge by the ignore rules alone, even for paths that exist.
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--verbose", "--non-matching", *IGNORED_RUNTIME_PATHS],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    not_ignored = [
+        line.split("\t")[-1]
+        for line in result.stdout.splitlines()
+        if line.startswith("::")
+    ]
+    assert not not_ignored, f"Runtime paths not ignored by git: {not_ignored}"
+
+
+def module_list_constant(relative_path, name):
+    # Read a module-level list literal without importing the module
+    # (read_stream.py starts a SparkSession on import).
+    tree = ast.parse((ROOT / relative_path).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in {relative_path}")
+
+
+def test_stream_event_types_match_producer():
+    producer_types = module_list_constant("data-generator/producer.py", "EVENT_TYPES")
+    stream_types = module_list_constant("spark-streaming/read_stream.py", "EVENT_TYPES")
+    assert stream_types == producer_types
