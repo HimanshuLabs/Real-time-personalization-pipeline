@@ -1,12 +1,26 @@
+from datetime import date, timedelta
 from pathlib import Path
 import json
+import random
+import sys
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, concat, lit, expr, row_number
-from pyspark.sql.window import Window
+from pyspark.sql.types import (
+    BooleanType,
+    DateType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
 
+# The dims are built from the producer's own catalog and user profiles, so every
+# id the producer can emit has a reference row. Importing producer.py does not
+# connect to Kafka: its Producer is only created inside main().
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data-generator"))
+from producer import NUM_USERS, PRODUCT_IDS, PRODUCTS, get_user_profile  # noqa: E402
 
-BRONZE_PATH = "data/bronze/user_events"
 
 USERS_CSV_PATH = "data/reference/users"
 PRODUCTS_CSV_PATH = "data/reference/products"
@@ -16,96 +30,80 @@ PRODUCTS_DIM_PATH = "data/dim/products"
 
 REPORT_PATH = "logs/reference_data_report.json"
 
+# Fixed anchor so signup_date doesn't change from one run to the next.
+SIGNUP_ANCHOR_DATE = date(2026, 1, 1)
 
-def has_parquet_files(path: str) -> bool:
-    target = Path(path)
-    return target.exists() and any(target.rglob("*.parquet"))
+DEVICE_PREFERENCES = ["mobile", "desktop", "tablet"]
+
+PRODUCT_BRANDS = ["NovaTech", "UrbanCart", "FitCore", "HomeNest", "PrimeStyle"]
+
+USERS_SCHEMA = StructType([
+    StructField("user_id", IntegerType(), True),
+    StructField("user_segment", StringType(), True),
+    StructField("user_city", StringType(), True),
+    StructField("device_preference", StringType(), True),
+    StructField("signup_date", DateType(), True),
+    StructField("account_status", StringType(), True),
+])
+
+PRODUCTS_SCHEMA = StructType([
+    StructField("product_id", IntegerType(), True),
+    StructField("product", StringType(), True),
+    StructField("product_category", StringType(), True),
+    StructField("product_brand", StringType(), True),
+    StructField("reference_price", DoubleType(), True),
+    StructField("is_active", BooleanType(), True),
+])
+
+
+def build_user_row(user_id):
+    profile = get_user_profile(user_id)
+
+    # Own seed: random.Random(user_id) is the profile's stream, and reusing it
+    # would make device_preference mirror gender (same first 3-way choice).
+    rng = random.Random(f"users-dim:{user_id}")
+
+    return (
+        user_id,
+        profile["user_segment"],
+        profile["home_city"],
+        rng.choice(DEVICE_PREFERENCES),
+        SIGNUP_ANCHOR_DATE - timedelta(days=rng.randint(0, 1199)),
+        "inactive" if rng.randint(1, 25) == 1 else "active",
+    )
+
+
+def build_product_row(category, product_name):
+    product_id = PRODUCT_IDS[product_name]
+    rng = random.Random(f"products-dim:{product_id}")
+
+    return (
+        product_id,
+        product_name,
+        category,
+        rng.choice(PRODUCT_BRANDS),
+        float(rng.randint(999, 90998)),
+        product_id % 20 != 0,
+    )
 
 
 spark = (
     SparkSession.builder
     .appName("CreateReferenceData")
+    .config("spark.sql.session.timeZone", "UTC")
     .getOrCreate()
 )
 
 spark.sparkContext.setLogLevel("WARN")
-
-bronze_df = None
-
-if has_parquet_files(BRONZE_PATH):
-    bronze_df = spark.read.parquet(BRONZE_PATH)
-    print(f"Loaded Bronze events from: {BRONZE_PATH}")
-else:
-    print("Bronze data not found. Creating default reference datasets.")
 
 
 # ---------------------------------------------------------------------
 # USER DIMENSION
 # ---------------------------------------------------------------------
 
-if bronze_df is not None and "user_id" in bronze_df.columns:
-    users_base = (
-        bronze_df
-        .select(col("user_id").cast("int").alias("user_id"))
-        .where(col("user_id").isNotNull())
-        .distinct()
-    )
-
-    if users_base.count() == 0:
-        users_base = spark.range(1, 501).withColumnRenamed("id", "user_id")
-else:
-    users_base = spark.range(1, 501).withColumnRenamed("id", "user_id")
-
-
-users_dim = (
-    users_base
-    .withColumn(
-        "user_segment",
-        expr("""
-            CASE pmod(user_id, 4)
-                WHEN 0 THEN 'new_user'
-                WHEN 1 THEN 'regular_user'
-                WHEN 2 THEN 'high_value_user'
-                ELSE 'discount_seeker'
-            END
-        """)
-    )
-    .withColumn(
-        "user_city",
-        expr("""
-            CASE pmod(user_id, 6)
-                WHEN 0 THEN 'Hyderabad'
-                WHEN 1 THEN 'Bengaluru'
-                WHEN 2 THEN 'Mumbai'
-                WHEN 3 THEN 'Delhi'
-                WHEN 4 THEN 'Pune'
-                ELSE 'Chennai'
-            END
-        """)
-    )
-    .withColumn(
-        "device_preference",
-        expr("""
-            CASE pmod(user_id, 3)
-                WHEN 0 THEN 'mobile'
-                WHEN 1 THEN 'desktop'
-                ELSE 'tablet'
-            END
-        """)
-    )
-    .withColumn(
-        "signup_date",
-        expr("date_sub(current_date(), CAST(pmod(user_id * 17, 1200) AS INT))")
-    )
-    .withColumn(
-        "account_status",
-        expr("""
-            CASE
-                WHEN pmod(user_id, 25) = 0 THEN 'inactive'
-                ELSE 'active'
-            END
-        """)
-    )
+users_dim = spark.createDataFrame(
+    [build_user_row(user_id) for user_id in range(1, NUM_USERS + 1)],
+    USERS_SCHEMA
 )
 
 
@@ -113,89 +111,13 @@ users_dim = (
 # PRODUCT DIMENSION
 # ---------------------------------------------------------------------
 
-default_products = [
-    ("wireless_headphones",),
-    ("gaming_laptop",),
-    ("running_shoes",),
-    ("smart_watch",),
-    ("mechanical_keyboard",),
-    ("coffee_maker",),
-    ("office_chair",),
-    ("fitness_tracker",),
-    ("bluetooth_speaker",),
-    ("backpack",),
-]
-
-if bronze_df is not None and "product" in bronze_df.columns:
-    products_base = (
-        bronze_df
-        .select(col("product").cast("string").alias("product"))
-        .where(col("product").isNotNull())
-        .distinct()
-    )
-
-    if products_base.count() == 0:
-        products_base = spark.createDataFrame(default_products, ["product"])
-
-elif bronze_df is not None and "product_id" in bronze_df.columns:
-    products_base = (
-        bronze_df
-        .select(col("product_id").cast("int").alias("product_id"))
-        .where(col("product_id").isNotNull())
-        .distinct()
-        .withColumn("product", concat(lit("product_"), col("product_id")))
-    )
-
-else:
-    products_base = spark.createDataFrame(default_products, ["product"])
-
-
-if "product_id" not in products_base.columns:
-    products_base = products_base.withColumn(
-        "product_id",
-        row_number().over(Window.orderBy("product"))
-    )
-
-
-products_dim = (
-    products_base
-    .withColumn(
-        "product_category",
-        expr("""
-            CASE pmod(abs(hash(product)), 5)
-                WHEN 0 THEN 'electronics'
-                WHEN 1 THEN 'fashion'
-                WHEN 2 THEN 'home'
-                WHEN 3 THEN 'fitness'
-                ELSE 'accessories'
-            END
-        """)
-    )
-    .withColumn(
-        "product_brand",
-        expr("""
-            CASE pmod(abs(hash(product)), 5)
-                WHEN 0 THEN 'NovaTech'
-                WHEN 1 THEN 'UrbanCart'
-                WHEN 2 THEN 'FitCore'
-                WHEN 3 THEN 'HomeNest'
-                ELSE 'PrimeStyle'
-            END
-        """)
-    )
-    .withColumn(
-        "reference_price",
-        expr("CAST(pmod(abs(hash(product)), 90000) + 999 AS DOUBLE)")
-    )
-    .withColumn(
-        "is_active",
-        expr("""
-            CASE
-                WHEN pmod(product_id, 20) = 0 THEN false
-                ELSE true
-            END
-        """)
-    )
+products_dim = spark.createDataFrame(
+    [
+        build_product_row(category, product_name)
+        for category, product_names in PRODUCTS.items()
+        for product_name in product_names
+    ],
+    PRODUCTS_SCHEMA
 )
 
 

@@ -3,6 +3,7 @@ from pyspark.sql import SparkSession
 spark = (
     SparkSession.builder
     .appName("SilverToGoldUserFeatures")
+    .config("spark.sql.session.timeZone", "UTC")
     .getOrCreate()
 )
 
@@ -22,15 +23,15 @@ gold_user_features = spark.sql("""
 
         user_id,
 
-        user_name,
+        MAX_BY(user_name, event_timestamp) AS user_name,
 
-        membership_tier,
+        MAX_BY(membership_tier, event_timestamp) AS membership_tier,
 
         COUNT(*) AS total_events,
 
         SUM(
             CASE
-                WHEN event_type = 'page_view'
+                WHEN event_type IN ('page_view', 'home_page_view')
                 THEN 1
                 ELSE 0
             END
@@ -54,7 +55,7 @@ gold_user_features = spark.sql("""
 
         SUM(
             CASE
-                WHEN event_type = 'purchase'
+                WHEN event_type IN ('purchase', 'payment_success')
                 THEN 1
                 ELSE 0
             END
@@ -97,9 +98,7 @@ gold_user_features = spark.sql("""
     FROM silver_user_events
 
     GROUP BY
-        user_id,
-        user_name,
-        membership_tier
+        user_id
 
 """)
 
