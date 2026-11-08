@@ -1,14 +1,27 @@
 # Real-Time Personalization Pipeline
 
-A local data pipeline for user-level personalization features, built from:
+[![CI](https://github.com/HimanshuLabs/Real-time-personalization-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/HimanshuLabs/Real-time-personalization-pipeline/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Spark](https://img.shields.io/badge/Spark-4.1.2-E25A1C)
+![Kafka](https://img.shields.io/badge/Kafka-4.1.2-231F20)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-- **Streaming ingestion**: Kafka → Spark Structured Streaming → Bronze (Parquet), with validation and a dead-letter topic.
-- **Batch feature computation**: Bronze → Silver → Gold → PostgreSQL.
-- **API serving**: FastAPI reads the PostgreSQL feature table.
+An end-to-end data pipeline that turns a stream of e-commerce events into per-user personalization features and serves them over an API.
 
-The events are synthetic. Features are computed in batch: the streaming job validates and lands events, and the batch jobs build and publish the features.
+**Kafka → Spark Structured Streaming → Bronze → Silver → Gold → PostgreSQL → FastAPI**, with a dead-letter topic, an atomic serving-table swap, Airflow orchestration and Prometheus/Grafana monitoring. Everything runs locally with Docker; the events are synthetic.
 
-## 1. Architecture
+> Streaming ingestion lands and validates events continuously. Features are computed in batch and published atomically, so the API always reads a complete, consistent table.
+
+## Highlights
+
+- **No silent data loss.** Every event lands in exactly one place: Bronze if valid, the dead-letter topic if not. Malformed timestamps and NULLs are routed to the DLQ instead of crashing the stream or vanishing.
+- **Lossless Bronze, dedup in Silver.** Bronze keeps every valid event; duplicates are removed by `event_id` in Silver, so no late event is ever dropped.
+- **Atomic publishing.** Gold is written to a staging table, validated (non-empty, unique `user_id`) and swapped into the live table in one PostgreSQL transaction. A failed publish leaves the old table untouched.
+- **Graceful operations.** Ctrl+C stops the stream cleanly in about a second, and a restart resumes from its checkpoint with no duplicates or gaps. Kafka and PostgreSQL data persist on Docker volumes.
+- **Contracts enforced by tests.** 35 tests run the real Spark scripts on small datasets and check exact results, plus the event schema, validation rules and API behaviour. CI runs them on every push to `main` and on pull requests.
+- **Observable.** Prometheus scrapes the API and two exporters; Grafana shows request rate, latency, Kafka throughput, DLQ rate and feature freshness.
+
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -24,23 +37,134 @@ flowchart LR
     PG --> API["FastAPI"]
 ```
 
-The full diagram, including monitoring, is in [docs/diagrams/project1_system_architecture.mmd](docs/diagrams/project1_system_architecture.mmd). Component details are in [docs/architecture.md](docs/architecture.md).
-
 | Stage | Code | Output |
 |---|---|---|
-| Event generation | `data-generator/producer.py` | Kafka `user_events` |
+| Event generation | `data-generator/producer.py` | Kafka `user_events` (3 partitions, keyed by `user_id`) |
 | Validation and landing | `spark-streaming/read_stream.py` (via `scripts/run_stream.sh`) | `data/bronze/user_events`, Kafka `user_events_dlq` |
 | Reference data | `reference-data/create_reference_data.py` | `data/dim/users`, `data/dim/products` |
 | Dedup and enrichment | `spark-batch/bronze_to_silver.py` | `data/silver/user_events` |
 | User features | `spark-batch/silver_to_gold.py` | `data/gold/user_features` |
 | Publish | `spark-batch/publish_gold_to_postgres.py` | PostgreSQL `user_features` |
 | Serving | `api/main.py` | HTTP API |
-| Orchestration (optional) | `dags/project1_personalization_pipeline.py` | Airflow DAG `project1_personalization_batch_pipeline` |
+| Orchestration | `dags/project1_personalization_pipeline.py` | Airflow DAG `project1_personalization_batch_pipeline` |
 | Monitoring | `monitoring/run_monitoring.sh` | Prometheus and Grafana |
 
-## 2. Event contract
+The full diagram, including monitoring, is in [docs/diagrams/project1_system_architecture.mmd](docs/diagrams/project1_system_architecture.mmd), and component details are in [docs/architecture.md](docs/architecture.md).
 
-The producer sends one JSON event per message to `user_events`, keyed by `user_id`. This event was produced by `generate_event()`:
+## Example run
+
+One end-to-end run, following the quick start below with three producers for 15 minutes:
+
+| Stage | Result |
+|---|---|
+| Kafka `user_events` | 3,520 events across 3 partitions |
+| Bronze | 3,520 rows, 3,520 distinct `event_id`s |
+| Dead-letter topic | 0 events |
+| Silver | 3,520 rows, 0 missing user or product references |
+| Gold and PostgreSQL | 2,530 users, one row each; 339 page views and 139 purchases |
+| API | `/health` 200; `/features/{id}` 200, 404 and 422 as specified |
+| Monitoring | all Prometheus targets up; feature freshness reported |
+
+Counts vary from run to run, because the producer generates random events.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Messaging | Apache Kafka 4.1.2 (KRaft, single broker) |
+| Processing | Apache Spark 4.1.2 (Structured Streaming and batch), Parquet |
+| Serving | PostgreSQL 16, FastAPI 0.115, psycopg 3 |
+| Orchestration | Apache Airflow 3.2 |
+| Monitoring | Prometheus 3.5, Grafana 13, kafka-exporter 1.10, custom feature-freshness exporter |
+| Quality | pytest, Ruff, GitHub Actions |
+| Runtime | Docker Compose, Python 3.11+, Java 17 |
+
+## Quick start
+
+Requirements: Docker, Java 17 and Python 3.11 or newer. Run everything from the repository root.
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements-ci.txt -r api/requirements.txt
+```
+
+1. Start Kafka (`127.0.0.1:9092`) and PostgreSQL (`127.0.0.1:5433`):
+
+   ```bash
+   docker compose up -d
+   ```
+
+2. Create both topics with 3 partitions:
+
+   ```bash
+   docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic user_events --partitions 3 --replication-factor 1
+   docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic user_events_dlq --partitions 3 --replication-factor 1
+   ```
+
+3. Start the stream in its own terminal (stop it with Ctrl+C):
+
+   ```bash
+   scripts/run_stream.sh
+   ```
+
+4. Produce events in another terminal (stop with Ctrl+C; it prints a `delivered / failed / undelivered` summary):
+
+   ```bash
+   python data-generator/producer.py
+   ```
+
+5. Build the reference data, Silver and Gold:
+
+   ```bash
+   spark-submit reference-data/create_reference_data.py
+   spark-submit spark-batch/bronze_to_silver.py
+   spark-submit spark-batch/silver_to_gold.py
+   ```
+
+6. Publish to PostgreSQL:
+
+   ```bash
+   spark-submit --packages org.postgresql:postgresql:42.7.4 spark-batch/publish_gold_to_postgres.py
+   ```
+
+7. Start the API and query it:
+
+   ```bash
+   uvicorn api.main:app --host 127.0.0.1 --port 8000
+   curl http://127.0.0.1:8000/health
+   ```
+
+   Then call `GET /features/{user_id}` for any `user_id` in `user_features`.
+
+8. Start monitoring (optional). Prometheus runs at `127.0.0.1:9090` and Grafana at `127.0.0.1:3000`; `monitoring/stop_monitoring.sh` removes the containers.
+
+   ```bash
+   monitoring/run_monitoring.sh
+   ```
+
+The batch scripts use paths relative to the current directory, so run them from the repository root. `spark-batch/query_gold_features.py` runs a few example queries on Gold.
+
+## How it works
+
+### Streaming ingestion and validation
+
+`scripts/run_stream.sh` starts `spark-streaming/read_stream.py` with the Spark Kafka connector (`spark-sql-kafka-0-10_2.13:4.1.2`). The stream reads `user_events` (from the earliest offset on first start, then from its checkpoint), parses each message with a typed schema and routes it every 10 seconds:
+
+- **Valid** events are appended to Bronze Parquet with their 58 fields plus `event_timestamp`.
+- **Invalid** events are written to `user_events_dlq` as their original JSON.
+
+An event is valid only if all of these hold:
+
+- **Required fields:** `event_id`, `session_id`, `user_id`, `event_type`, `product_name`, `discounted_price`, `event_time`, `source` and `schema_version` are present.
+- **Timestamp:** `event_time` parses (`try_to_timestamp`; a malformed value becomes NULL and fails the check instead of stopping the stream).
+- **Contract:** `event_id` is not blank, `event_type` is one of the 26 `EVENT_TYPES`, `schema_version` is `"4.0"`, and `user_id >= 1`.
+- **Value ranges:** `quantity >= 1`; `original_price >= 0`; `0 <= discounted_price <= original_price`; `0 <= discount_percent <= 100`; `purchase_probability`, `cart_abandonment_probability` and `fraud_score` are each between 0 and 1.
+
+All rules feed one `is_valid` column wrapped in `coalesce(..., false)`, so a NULL in any checked column, or a message that isn't valid JSON, goes to the DLQ instead of disappearing from both outputs.
+
+<details>
+<summary><b>Example event</b> (schema 4.0, produced by <code>generate_event()</code>)</summary>
 
 ```json
 {
@@ -105,153 +229,41 @@ The producer sends one JSON event per message to `user_events`, keyed by `user_i
 }
 ```
 
-- **Users:** `user_id` is drawn from 1..`NUM_USERS`. Each user has a fixed profile (name, email, tier, segment, home city and so on), so these fields are stable per user.
-- **Products:** every category has products. `product_id` is fixed per product: the sorted product names are numbered from 10000.
-- **Event types the producer emits:** `product_view`, `search`, `recommendation_impression`, `recommendation_click`, `home_page_view`, `add_to_cart`, `checkout_started`, `wishlist_add`, `login`, `payment_success`, `ad_click`, `review_submitted`, `logout`.
-- **Event types the stream accepts:** the 26 types in `EVENT_TYPES`. The list is defined in both the producer and the stream, and a test keeps the two in sync.
+- **Users:** `user_id` is drawn from 1..`NUM_USERS`, and each user has a fixed profile (name, email, tier, segment, home city and so on).
+- **Products:** every category has products, and `product_id` is fixed per product (the sorted product names are numbered from 10000).
+- **Event types the producer emits:** `product_view`, `search`, `recommendation_impression`, `recommendation_click`, `home_page_view`, `add_to_cart`, `checkout_started`, `wishlist_add`, `login`, `payment_success`, `ad_click`, `review_submitted`, `logout`. The stream accepts all 26 types in `EVENT_TYPES`; a test keeps the producer's and the stream's lists in sync.
 
-### Validation and DLQ routing
+</details>
 
-An event goes to Bronze only if all of these hold. Otherwise its original JSON string is written to the Kafka topic `user_events_dlq`.
+### Batch feature computation
 
-- **Required fields:** `event_id`, `session_id`, `user_id`, `event_type`, `product_name`, `discounted_price`, `event_time`, `source` and `schema_version` are present.
-- **Timestamp:** `event_time` parses to a timestamp. A malformed value becomes NULL and fails the check instead of stopping the stream.
-- **Identity and contract:**
-  - `event_id` is not blank;
-  - `event_type` is in `EVENT_TYPES`;
-  - `schema_version` is `"4.0"`;
-  - `user_id >= 1`.
-- **Value ranges:**
-  - `quantity >= 1`, `original_price >= 0`, and `0 <= discounted_price <= original_price`;
-  - `0 <= discount_percent <= 100`;
-  - `purchase_probability`, `cart_abandonment_probability` and `fraud_score` are each between 0 and 1.
+1. **Reference data:** `create_reference_data.py` builds the users dim (`user_id` 1..`NUM_USERS`) and the products dim (the producer's catalog) from the producer's own profiles and catalog, so every id the producer can emit has a reference row. Derived columns use fixed seeds, so the output is identical on every run.
+2. **Silver:** `bronze_to_silver.py` drops rows missing `user_id`, `event_type` or `event_timestamp`, removes duplicate `event_id`s, left-joins both dims, keeps the event's own `user_segment`, and flags missing references.
+3. **Gold:** `silver_to_gold.py` aggregates Silver to one row per `user_id`.
+4. **Publish:** `publish_gold_to_postgres.py` writes Gold to `user_features_staging` over JDBC, then in one transaction checks that staging is non-empty with unique `user_id`s, adds the primary key, drops `user_features`, renames staging to `user_features` and renames the key to `user_features_pkey`. Any failure rolls back and leaves the live table as it was. Queries already running finish first, because the swap waits for their locks; queries that arrive during the swap wait for its brief lock and then read the new table.
 
-All checks are combined into one `is_valid` column wrapped in `coalesce(..., false)`, so a NULL in any checked column, or a message that isn't valid JSON, counts as invalid instead of disappearing. Bronze keeps the 58 parsed fields plus `event_timestamp`.
+Every Spark job runs with `spark.sql.session.timeZone=UTC`. The Airflow DAG `project1_personalization_batch_pipeline` runs these steps daily with `max_active_runs=1`:
+`verify_bronze_exists → create_reference_data → bronze_to_silver → verify_silver_exists → silver_to_gold → verify_gold_exists → gold_to_postgres → verify_postgres_api_path`.
 
-## 3. Quick start
+### Feature table: PostgreSQL `user_features`
 
-Requirements: Docker, Java 17 and Python 3.11 or newer. Run everything from the repository root.
-
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements-ci.txt -r api/requirements.txt
-```
-
-1. Start Kafka (`127.0.0.1:9092`) and PostgreSQL (`127.0.0.1:5433`):
-
-   ```bash
-   docker compose up -d
-   ```
-
-2. Create both topics with 3 partitions:
-
-   ```bash
-   docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic user_events --partitions 3 --replication-factor 1
-   docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic user_events_dlq --partitions 3 --replication-factor 1
-   ```
-
-3. Start the stream in its own terminal. Stop it with Ctrl+C.
-
-   ```bash
-   scripts/run_stream.sh
-   ```
-
-   The script runs `spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2 spark-streaming/read_stream.py`.
-
-4. Produce events in another terminal. Stop with Ctrl+C; it prints a `delivered / failed / undelivered` summary.
-
-   ```bash
-   python data-generator/producer.py
-   ```
-
-5. Build the reference data:
-
-   ```bash
-   spark-submit reference-data/create_reference_data.py
-   ```
-
-6. Build Silver and Gold:
-
-   ```bash
-   spark-submit spark-batch/bronze_to_silver.py
-   spark-submit spark-batch/silver_to_gold.py
-   ```
-
-7. Publish to PostgreSQL:
-
-   ```bash
-   spark-submit --packages org.postgresql:postgresql:42.7.4 spark-batch/publish_gold_to_postgres.py
-   ```
-
-8. Start the API:
-
-   ```bash
-   uvicorn api.main:app --host 127.0.0.1 --port 8000
-   curl http://127.0.0.1:8000/health
-   ```
-
-9. Start monitoring (optional). Prometheus is at `127.0.0.1:9090` and Grafana at `127.0.0.1:3000`. `monitoring/stop_monitoring.sh` removes the containers.
-
-   ```bash
-   monitoring/run_monitoring.sh
-   ```
-
-The batch scripts use paths relative to the current directory, so run them from the repository root. `spark-batch/query_gold_features.py` runs a few example queries on Gold.
-
-## 4. Configuration
-
-| Variable | Default | Used by |
+| Column | Type | Meaning |
 |---|---|---|
-| `POSTGRES_HOST` | `localhost` | API, publish job, DAG verification task, feature-freshness exporter |
-| `POSTGRES_PORT` | `5433` | same as above |
-| `POSTGRES_DB` | `personalization_db` | same as above |
-| `POSTGRES_USER` | `de_user` | same as above |
-| `POSTGRES_PASSWORD` | `de_password` | same as above |
-| `PROJECT1_ROOT` | the repository root, derived from the file's location | `read_stream.py` (Bronze and checkpoint paths), Airflow DAG (task working directory) |
-| `NUM_USERS` | `5000` | `producer.py` and `create_reference_data.py`; set the same value for both, or users outside the users dim show as missing references |
-| `SPARK_KAFKA_VERSION` | `4.1.2` | `scripts/run_stream.sh` (Spark Kafka connector version) |
-| `GRAFANA_ADMIN_PASSWORD` | unset: a random 24-character password is generated and printed once | `monitoring/run_monitoring.sh` |
-
-The feature-freshness exporter's own default host is `host.docker.internal`, but `run_monitoring.sh` starts it with `POSTGRES_HOST=localhost` and `POSTGRES_PORT=5433`. The Docker Compose file creates the database with the default name, user and password above.
-
-## 5. Serving contract
-
-### PostgreSQL `user_features`
-
-| Column | Type |
-|---|---|
-| `user_id` | integer (PRIMARY KEY, `user_features_pkey`) |
-| `user_name` | text |
-| `membership_tier` | text |
-| `total_events` | bigint |
-| `page_view_count` | bigint |
-| `product_view_count` | bigint |
-| `add_to_cart_count` | bigint |
-| `purchase_count` | bigint |
-| `search_count` | bigint |
-| `avg_event_price` | double precision |
-| `max_event_price` | double precision |
-| `avg_engagement_score` | double precision |
-| `avg_purchase_probability` | double precision |
-| `last_event_timestamp` | timestamp with time zone |
-| `unique_products_interacted` | bigint |
-
-How the columns are computed:
-- **Page views and purchases:** `page_view_count` counts `page_view` and `home_page_view` events, and `purchase_count` counts `purchase` and `payment_success` events.
-- **Other counts:** `product_view_count`, `add_to_cart_count` and `search_count` count those event types.
-- **Name and tier:** `user_name` and `membership_tier` come from the user's latest event.
-- **Prices and scores:** `avg_event_price` and `max_event_price` are rounded to 2 decimals, as is `avg_engagement_score`; `avg_purchase_probability` is rounded to 4.
-- **Remaining columns:** `last_event_timestamp` is the latest event time, and `unique_products_interacted` counts distinct product names.
-
-**Publishing is atomic.** The job writes to `user_features_staging`, then in one transaction:
-1. checks that staging is non-empty and that every `user_id` is unique;
-2. adds the primary key;
-3. drops `user_features`;
-4. renames staging to `user_features`;
-5. renames the key to `user_features_pkey`.
-
-If anything fails, the transaction rolls back and the live table stays as it was. Queries already running finish first, because the swap waits for their locks; queries that arrive during the swap wait for its brief lock and then read the new table. Readers never see a missing, empty or partially written table.
+| `user_id` | integer | primary key (`user_features_pkey`) |
+| `user_name` | text | from the user's latest event |
+| `membership_tier` | text | from the user's latest event |
+| `total_events` | bigint | all events |
+| `page_view_count` | bigint | `page_view` and `home_page_view` events |
+| `product_view_count` | bigint | `product_view` events |
+| `add_to_cart_count` | bigint | `add_to_cart` events |
+| `purchase_count` | bigint | `purchase` and `payment_success` events |
+| `search_count` | bigint | `search` events |
+| `avg_event_price` | double precision | average `discounted_price`, 2 decimals |
+| `max_event_price` | double precision | highest `discounted_price`, 2 decimals |
+| `avg_engagement_score` | double precision | 2 decimals |
+| `avg_purchase_probability` | double precision | 4 decimals |
+| `last_event_timestamp` | timestamp with time zone | latest event time |
+| `unique_products_interacted` | bigint | distinct product names |
 
 ### API
 
@@ -266,65 +278,101 @@ If anything fails, the transaction rolls back and the live table stays as it was
 | `GET /features/{user_id}` | 500 | `{"detail": "Feature lookup failed"}` |
 | `GET /metrics` | 200 | Prometheus metrics |
 
-`features` contains `user_id`, `total_events`, `page_view_count`, `product_view_count`, `add_to_cart_count`, `purchase_count`, `search_count`, `avg_event_price`, `max_event_price`, `last_event_timestamp`, `unique_products_interacted`, `avg_engagement_score` and `avg_purchase_probability`. Error responses never include exception text; details are logged server-side.
+`features` contains every column above except `user_name` and `membership_tier`. Error responses never include exception text; details are logged server-side.
 
-## 6. Operations
+## Configuration
 
-- **Stopping the stream:** press Ctrl+C, or `kill -TERM -<pgid>`, in the `scripts/run_stream.sh` terminal. The stream stops both queries and Spark, prints `[stream] stopped cleanly` and exits 0. The script makes the JVM ignore SIGINT/SIGTERM, so the signal reaches only the Python driver, which shuts down in order.
-- **Restarting the stream:** it resumes from `checkpoints/bronze_user_events` and `checkpoints/dlq`.
-- **Resetting the stream (re-reading Kafka from the start):** stop the stream, then move **both** `checkpoints/` **and** `data/bronze/user_events` out of the repository. The Bronze folder holds the file sink's own log (`_spark_metadata`). A new checkpoint paired with an old `_spark_metadata` makes the sink treat new batches as already written and skip them without an error. After a reset the DLQ query re-reads the topic too, so invalid events already in the DLQ are written there again.
-- **Kafka data** lives on the `kafka_data` Docker volume and **PostgreSQL data** on `postgres_data`; both survive container recreation. Never run `docker compose down -v`: it deletes both volumes.
-- **Airflow (optional):** the DAG `project1_personalization_batch_pipeline` runs daily with `max_active_runs=1`:
-  `verify_bronze_exists → create_reference_data → bronze_to_silver → verify_silver_exists → silver_to_gold → verify_gold_exists → gold_to_postgres → verify_postgres_api_path`.
-  Its Python dependencies are in `requirements-airflow.txt`. The tasks call `spark-submit`, so it must be on the worker's PATH.
+| Variable | Default | Used by |
+|---|---|---|
+| `POSTGRES_HOST` | `localhost` | API, publish job, DAG verification task, feature-freshness exporter |
+| `POSTGRES_PORT` | `5433` | same as above |
+| `POSTGRES_DB` | `personalization_db` | same as above |
+| `POSTGRES_USER` | `de_user` | same as above |
+| `POSTGRES_PASSWORD` | `de_password` | same as above |
+| `PROJECT1_ROOT` | the repository root | `read_stream.py` (Bronze and checkpoint paths), Airflow DAG (task working directory) |
+| `NUM_USERS` | `5000` | `producer.py` and `create_reference_data.py`; use the same value for both |
+| `SPARK_KAFKA_VERSION` | `4.1.2` | `scripts/run_stream.sh` (Spark Kafka connector version) |
+| `GRAFANA_ADMIN_PASSWORD` | generated and printed once if unset | `monitoring/run_monitoring.sh` |
+
+The feature-freshness exporter's own default host is `host.docker.internal`; `run_monitoring.sh` starts it with `POSTGRES_HOST=localhost` and `POSTGRES_PORT=5433`. Docker Compose creates the database with the default name, user and password above.
+
+## Operations
+
+- **Stop the stream:** press Ctrl+C (or `kill -TERM -<pgid>`) in the `scripts/run_stream.sh` terminal. Both queries and Spark stop, the stream prints `[stream] stopped cleanly` and exits 0. The script makes the JVM ignore SIGINT/SIGTERM, so the signal reaches only the Python driver, which shuts down in order.
+- **Restart the stream:** it resumes from `checkpoints/bronze_user_events` and `checkpoints/dlq`.
+- **Reset the stream** (re-read Kafka from the start): stop it, then move **both** `checkpoints/` **and** `data/bronze/user_events` out of the repository. The Bronze folder holds the file sink's own log (`_spark_metadata`); a new checkpoint paired with an old `_spark_metadata` makes the sink skip new batches without an error. After a reset, the DLQ query re-reads the topic too, so invalid events already in the DLQ are written there again.
+- **Data persistence:** Kafka data lives on the `kafka_data` volume and PostgreSQL data on `postgres_data`; both survive container recreation. Never run `docker compose down -v`, which deletes both volumes.
+- **Airflow:** the DAG's Python dependencies are in `requirements-airflow.txt`. Its tasks call `spark-submit`, so it must be on the worker's PATH.
 - **Monitoring:** the Grafana dashboard covers API request rate and p95 latency, `user_events` and DLQ throughput, consumer-group lag, `user_features` row count, feature freshness and exporter health. Spark keeps its Kafka offsets in checkpoints rather than a consumer group, so the consumer-group lag panel normally shows no data; feature freshness is the signal for the batch-to-serving path.
 
-## 7. Design decisions
+## Design decisions
 
-- **Lossless Bronze, dedup in Silver.** Bronze keeps every valid event, including duplicates. Silver removes duplicate `event_id`s. Bronze has no streaming watermark or stateful dedup, so late events are never dropped.
-- **One coalesced `is_valid`.** Every validation rule feeds a single column, defaulting to false, so each event lands in exactly one of Bronze and the DLQ.
-- **Staging-table swap.** The serving table is replaced in one transaction after validation, with a stable primary-key name.
-- **Reference dims from the producer.** The users and products dims come from the producer's catalog and user profiles, so every id the producer emits has a reference row. They are rebuilt on every run, and the derived columns use fixed seeds and a fixed anchor date, so the output is the same each time.
-- **Spark sessions in UTC.** Every Spark job sets `spark.sql.session.timeZone=UTC`. Event times carry `+00:00`, and PostgreSQL stores `timestamp with time zone`.
+| Decision | Why |
+|---|---|
+| Lossless Bronze, dedup in Silver | A streaming watermark with stateful dedup would silently drop late events from the raw layer. |
+| One coalesced `is_valid` column | Every event lands in exactly one of Bronze and the DLQ; a NULL can't slip past both filters. |
+| Staging-table swap | Readers never see a missing, empty or partially written serving table, and a failed publish changes nothing. |
+| Reference dims generated from the producer | Every id the producer emits has a reference row, and rebuilding the dims is deterministic. |
+| Spark sessions in UTC | Timestamps mean the same thing on every machine; PostgreSQL stores `timestamp with time zone`. |
+| Signals handled by the Python driver only | A terminal Ctrl+C stops the queries in order instead of killing the JVM mid-batch. |
 
-## 8. Testing and CI
+## Testing and CI
 
 ```bash
 ruff check .
 python -m pytest -q
 ```
 
-The suite has 35 tests:
-
 | File | Tests | Covers |
 |---|---:|---|
-| `tests/test_project_structure.py` | 3 | required files exist; runtime folders (`venv/`, `venv-airflow/`, `data/`, `checkpoints/`, `logs/`, `airflow_home/`) are git-ignored; producer and stream `EVENT_TYPES` match |
-| `tests/test_python_syntax.py` | 1 | every Python file parses |
-| `tests/test_feature_api.py` | 8 | API with a mocked database: found / 404 / 500 / 503 reasons, no credentials or exception text in responses, `POSTGRES_*` honored, `user_id` typed as int |
-| `tests/test_producer_contract.py` | 7 | 58 keys in order, schema 4.0, known event types, unique `event_id`s, every category has products, one-to-one `product_id`s, stable profile per user; importing the producer creates no Kafka connection |
-| `tests/test_stream_validation.py` | 11 | each validation rule routes to the DLQ, valid + invalid = input, Bronze/DLQ columns unchanged, importing the stream module starts no Spark |
 | `tests/test_batch_pipeline.py` | 5 | the real reference, Silver and Gold scripts on a tiny Bronze: duplicate removed, event `user_segment` kept, no missing references, one Gold row per user, exact page-view and purchase counts |
+| `tests/test_stream_validation.py` | 11 | each validation rule routes to the DLQ, valid + invalid = input, Bronze/DLQ columns unchanged, importing the stream module starts no Spark |
+| `tests/test_feature_api.py` | 8 | API with a mocked database: found / 404 / 500 / 503 reasons, no credentials or exception text in responses, `POSTGRES_*` honoured, `user_id` typed as int |
+| `tests/test_producer_contract.py` | 7 | 58 keys in order, schema 4.0, known event types, unique `event_id`s, every category has products, one-to-one `product_id`s, stable profile per user, no Kafka connection on import |
+| `tests/test_project_structure.py` | 3 | required files exist, runtime folders are git-ignored, producer and stream `EVENT_TYPES` match |
+| `tests/test_python_syntax.py` | 1 | every Python file parses |
 
-GitHub Actions (`.github/workflows/ci.yml`) has two jobs:
-- **Python lint and validation:** sets up Python 3.11 and Java 17 (Temurin), installs `requirements-ci.txt`, then runs `ruff check .` and `pytest -q`.
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request to `main`:
+- **Python lint and validation:** Python 3.11 and Java 17 (Temurin), `requirements-ci.txt`, `ruff check .` and `pytest -q`.
 - **FastAPI Docker build validation:** builds `api/Dockerfile`.
 
-## 9. Known limitations
+## Project structure
 
-- **Batch features:** features are recomputed in batch runs. The stream does not update `user_features`.
-- **Full reprocessing:** every batch run reprocesses all of Bronze and rebuilds Silver, Gold and the serving table.
-- **No raw payload in Bronze:** Bronze stores the parsed columns, not the raw Kafka payload. Only rejected events keep their original JSON, in the DLQ.
-- **Synthetic `user_name`:** the serving table includes `user_name` (synthetic). A production feature store would serve IDs and features only, not personal fields.
-- **No rejection reason in the DLQ:** DLQ messages carry the original JSON only, not which rule rejected them.
-- **No connection pool:** the API opens one PostgreSQL connection per request.
-- **Single Kafka broker:** one broker with replication factor 1.
-- **Airflow not in the reproducible setup:** the Airflow environment isn't part of the setup above, and CI only checks the DAG's Python syntax; it doesn't run it.
-- **JVM ignores INT/TERM:** `scripts/run_stream.sh` makes the JVM ignore SIGINT and SIGTERM. If the Python driver ever hangs, only SIGKILL stops the JVM.
-- **Product ids can shift:** adding or renaming a product renumbers `product_id`s, because ids follow sorted product names. The dims are rebuilt on every run, so they stay in step, but events already in Bronze keep their old ids.
-- **Default credentials:** PostgreSQL uses local defaults (`de_user` / `de_password`).
-- **Grafana password exposure:** the Grafana admin password is passed as an environment variable and is visible through `docker inspect grafana`.
-- **Floating image tags:** `postgres:16` and the `python:3.11-slim` / `python:3.12-slim` base images are tagged by major/minor version only, so they can change underneath.
+```text
+.
+├── api/                    FastAPI service and Dockerfile
+├── dags/                   Airflow DAG for the batch pipeline
+├── data-generator/         Kafka event producer
+├── docs/                   architecture notes and full diagram
+├── monitoring/             Prometheus, Grafana, exporters, start/stop scripts
+├── reference-data/         users and products dims
+├── scripts/run_stream.sh   stream launcher with clean Ctrl+C handling
+├── spark-batch/            Bronze → Silver → Gold → PostgreSQL jobs
+├── spark-streaming/        Kafka → Bronze / DLQ streaming job
+├── tests/                  pytest suite
+└── docker-compose.yml      Kafka and PostgreSQL
+```
 
-## 10. License
+## Limitations and next steps
+
+| Limitation | Production next step |
+|---|---|
+| Features are recomputed in batch; the stream doesn't update `user_features`. | Incremental upserts from the stream (`foreachBatch` + `INSERT … ON CONFLICT`) for near-real-time counters. |
+| Every batch run reprocesses all of Bronze. | Incremental processing with a table format such as Delta Lake and `MERGE`. |
+| Bronze stores parsed columns, not the raw Kafka payload. | Keep the raw value alongside the parsed columns for full replay. |
+| DLQ messages don't record which rule rejected them. | Add the failed rule as a Kafka header on each DLQ message. |
+| Single Kafka broker, replication factor 1. | A multi-broker cluster with replication factor 3. |
+| The Airflow DAG is syntax-checked in CI but not executed. | A DAG integrity test and a containerised Airflow in the quick start. |
+
+Security and privacy: this is a local demo with default credentials, and the serving table includes a synthetic `user_name`. A production deployment would use a secrets manager and serve IDs and features only.
+
+## Operational notes
+
+- `scripts/run_stream.sh` makes the JVM ignore SIGINT and SIGTERM so the Python driver can stop the queries in order. If the driver ever hangs, only SIGKILL stops the JVM.
+- `product_id`s follow the sorted product names, so adding or renaming a product renumbers them. The dims rebuild on every run, but events already in Bronze keep their old ids.
+- The Grafana admin password is passed as an environment variable and is visible through `docker inspect grafana`.
+- `postgres:16` and the `python:3.11-slim` / `python:3.12-slim` base images are tagged by major/minor version only.
+
+## License
 
 MIT. See [LICENSE](LICENSE).
