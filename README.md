@@ -59,13 +59,25 @@ One end-to-end run, following the quick start below with three producers for 15 
 |---|---|
 | Kafka `user_events` | 3,520 events across 3 partitions |
 | Bronze | 3,520 rows, 3,520 distinct `event_id`s |
-| Dead-letter topic | 0 events |
+| Dead-letter topic | 0 events: the producer only emits valid events (rejection paths are covered by the validation tests) |
 | Silver | 3,520 rows, 0 missing user or product references |
 | Gold and PostgreSQL | 2,530 users, one row each; 339 page views and 139 purchases |
 | API | `/health` 200; `/features/{id}` 200, 404 and 422 as specified |
 | Monitoring | all Prometheus targets up; feature freshness reported |
 
-Counts vary from run to run, because the producer generates random events.
+ Counts vary from run to run, because the producer generates random events.
+
+### See the dead-letter topic in action
+
+With the stream running, send a malformed event and watch it land in `user_events_dlq` instead of Bronze:
+
+```bash
+echo '{"event_id":"demo-bad-1","event_time":"not-a-date"}' | docker exec -i kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic user_events
+sleep 15
+docker exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic user_events_dlq
+```
+
+One partition of `user_events_dlq` goes up by 1.
 
 ## Tech stack
 
