@@ -2,7 +2,7 @@ flowchart LR
     %% Streaming ingestion -> batch feature computation -> API serving
 
     subgraph SRC["Event source"]
-        GEN["data-generator/producer.py<br/>synthetic events, schema 4.0<br/>stable profile per user_id"]
+        GEN["data-generator/producer.py<br/>session-based events, schema 4.0<br/>purchase funnel, catalog prices (INR)<br/>journey stage by event type,<br/>device context fixed per session<br/>active accounts and products only"]
     end
 
     subgraph KAFKA["Kafka (single broker)"]
@@ -12,7 +12,7 @@ flowchart LR
 
     subgraph STREAM["Streaming ingestion: spark-streaming/read_stream.py"]
         PARSE["Parse JSON with typed schema<br/>try_to_timestamp(event_time)"]
-        VALIDATE{"is_valid<br/>required fields + value rules,<br/>NULL counts as invalid"}
+        VALIDATE{"is_valid<br/>required fields + value rules,<br/>product fields required on commerce events,<br/>NULL counts as invalid"}
         CKPT[("checkpoints/<br/>bronze_user_events, dlq")]
     end
 
@@ -20,13 +20,13 @@ flowchart LR
         BRONZE[("Bronze<br/>data/bronze/user_events<br/>valid events, duplicates kept")]
         DIMS[("Reference dims<br/>data/dim/users, data/dim/products")]
         SILVER[("Silver<br/>data/silver/user_events")]
-        GOLD[("Gold<br/>data/gold/user_features<br/>one row per user")]
+        GOLD[("Gold<br/>data/gold/user_features<br/>one row per user, 19 columns")]
     end
 
     subgraph BATCH["Batch feature computation (manual or Airflow DAG)"]
-        REF["reference-data/create_reference_data.py<br/>dims from the producer catalog and profiles"]
+        REF["reference-data/create_reference_data.py<br/>dims from the producer catalog, profiles,<br/>list prices and status rules"]
         B2S["spark-batch/bronze_to_silver.py<br/>dedup by event_id, left-join dims,<br/>reference-missing flags"]
-        S2G["spark-batch/silver_to_gold.py<br/>GROUP BY user_id"]
+        S2G["spark-batch/silver_to_gold.py<br/>GROUP BY user_id, DECIMAL averages<br/>commerce-only prices, spend, sessions, recency"]
         PUB["spark-batch/publish_gold_to_postgres.py<br/>JDBC to staging, validate,<br/>swap in one transaction"]
     end
 
