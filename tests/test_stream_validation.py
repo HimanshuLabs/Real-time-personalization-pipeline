@@ -83,6 +83,22 @@ INVALID_CHANGES = {
     "quantity_0": {"quantity": 0},
     "null_fraud_score": {"fraud_score": None},
     "malformed_event_time": {"event_time": "not-a-timestamp"},
+    "product_view_null_product_name": {"product_name": None},
+    "product_view_null_product_id": {"product_id": None},
+    "login_negative_price": {"event_type": "login", "discounted_price": -1.0},
+}
+
+PRODUCT_AND_PRICE_FIELDS = [
+    "product_id", "product_name", "category", "quantity", "original_price",
+    "discount_percent", "discounted_price", "cart_value",
+]
+
+# Non-commerce events may leave product and price fields NULL.
+VALID_CHANGES = {
+    "login_null_product": {
+        "event_type": "login",
+        **{field: None for field in PRODUCT_AND_PRICE_FIELDS},
+    },
 }
 
 
@@ -115,7 +131,7 @@ def read_stream():
 @pytest.fixture(scope="module")
 def split(spark, read_stream):
     events = [VALID_EVENT]
-    for name, change in INVALID_CHANGES.items():
+    for name, change in {**VALID_CHANGES, **INVALID_CHANGES}.items():
         event = copy.deepcopy(VALID_EVENT)
         event.update(change)
         event["event_id"] = name
@@ -149,7 +165,7 @@ def test_import_has_no_side_effects():
 
 def test_valid_row_passes(split):
     _, _, _, valid_ids, _ = split
-    assert valid_ids == ["valid"]
+    assert valid_ids == sorted(["valid", *VALID_CHANGES])
 
 
 @pytest.mark.parametrize("name", sorted(INVALID_CHANGES))

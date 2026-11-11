@@ -74,3 +74,17 @@ def test_stream_event_types_match_producer():
     producer_types = module_list_constant("data-generator/producer.py", "EVENT_TYPES")
     stream_types = module_list_constant("spark-streaming/read_stream.py", "EVENT_TYPES")
     assert stream_types == producer_types
+
+
+def test_commerce_event_types_match_and_are_known():
+    producer_commerce = module_list_constant("data-generator/producer.py", "COMMERCE_EVENT_TYPES")
+    stream_commerce = module_list_constant("spark-streaming/read_stream.py", "COMMERCE_EVENT_TYPES")
+    assert stream_commerce == producer_commerce
+    assert len(set(producer_commerce)) == len(producer_commerce)
+
+    event_types = module_list_constant("data-generator/producer.py", "EVENT_TYPES")
+    unknown = set(producer_commerce) - set(event_types)
+    assert not unknown, f"COMMERCE_EVENT_TYPES not in EVENT_TYPES: {sorted(unknown)}"
+
+    gold_commerce = module_list_constant("spark-batch/silver_to_gold.py", "COMMERCE_EVENT_TYPES")
+    assert gold_commerce == producer_commerce

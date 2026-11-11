@@ -57,11 +57,6 @@ if "event_timestamp" not in df.columns:
     else:
         raise ValueError("Bronze data is missing event timestamp column")
 
-if "price" in df.columns:
-    df = df.withColumn("price", col("price").cast("double"))
-else:
-    df = df.withColumn("price", lit(None).cast("double"))
-
 if "product" not in df.columns and "product_id" not in df.columns:
     df = df.withColumn("product", lit(None).cast("string"))
 
@@ -187,10 +182,17 @@ if "reference_price" not in df.columns:
 if "reference_product_id" not in df.columns:
     df = df.withColumn("reference_product_id", lit(None).cast("int"))
 
+# Non-commerce events carry no product, so only an event that names a product
+# can be missing its product reference.
+product_key = col("product_id") if "product_id" in df.columns else col("product")
+
 df = (
     df
     .withColumn("is_user_reference_missing", col("user_city").isNull())
-    .withColumn("is_product_reference_missing", col("product_category").isNull())
+    .withColumn(
+        "is_product_reference_missing",
+        product_key.isNotNull() & col("product_category").isNull()
+    )
 )
 
 
@@ -210,7 +212,6 @@ preferred_columns = [
     "reference_product_id",
     "product_category",
     "product_brand",
-    "price",
     "reference_price",
     "event_timestamp",
     "source",

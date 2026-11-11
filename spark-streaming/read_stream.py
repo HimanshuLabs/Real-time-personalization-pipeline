@@ -1,6 +1,8 @@
+import operator
 import os
 import signal
 import threading
+from functools import reduce
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -12,6 +14,7 @@ from pyspark.sql.functions import (
     lit,
     trim,
     try_to_timestamp,
+    when,
 )
 from pyspark.sql.types import (
     StructType,
@@ -60,6 +63,31 @@ EVENT_TYPES = [
     "login",
     "logout"
 ]
+
+# Must match COMMERCE_EVENT_TYPES in data-generator/producer.py.
+# These events must carry a product and its prices; the others may omit them.
+COMMERCE_EVENT_TYPES = [
+    "product_view",
+    "image_zoom",
+    "wishlist_add",
+    "wishlist_remove",
+    "add_to_cart",
+    "remove_from_cart",
+    "checkout_started",
+    "payment_initiated",
+    "payment_success",
+    "payment_failed",
+    "order_placed",
+    "order_cancelled",
+    "return_requested",
+    "review_submitted",
+    "rating_given",
+    "recommendation_impression",
+    "recommendation_click",
+    "search_result_click"
+]
+
+COMMERCE_REQUIRED_FIELDS = ["product_id", "product_name", "original_price", "discounted_price"]
 
 SUPPORTED_SCHEMA_VERSIONS = ["4.0"]
 
@@ -129,6 +157,21 @@ def between(name, low, high):
     return (col(name) >= low) & (col(name) <= high)
 
 
+def all_of(conditions):
+    return reduce(operator.and_, conditions)
+
+
+def product_price_rules():
+    # Each rule is NULL when a field it reads is NULL.
+    return [
+        col("quantity") >= 1,
+        col("original_price") >= 0,
+        col("discounted_price") >= 0,
+        col("discounted_price") <= col("original_price"),
+        between("discount_percent", 0, 100),
+    ]
+
+
 def parse_events(raw_df):
     # raw_df has the Kafka "value" column (binary or string).
     return raw_df.select(
@@ -160,8 +203,6 @@ def build_validated(parsed_df):
         col("session_id").isNotNull() &
         col("user_id").isNotNull() &
         col("event_type").isNotNull() &
-        col("product_name").isNotNull() &
-        col("discounted_price").isNotNull() &
         col("event_time").isNotNull() &
         col("event_timestamp").isNotNull() &
         col("source").isNotNull() &
@@ -173,21 +214,35 @@ def build_validated(parsed_df):
         col("event_type").isin(EVENT_TYPES) &
         col("schema_version").isin(SUPPORTED_SCHEMA_VERSIONS) &
         (col("user_id") >= 1) &
-        (col("quantity") >= 1) &
-        (col("original_price") >= 0) &
-        (col("discounted_price") >= 0) &
-        (col("discounted_price") <= col("original_price")) &
-        between("discount_percent", 0, 100) &
         between("purchase_probability", 0, 1) &
         between("cart_abandonment_probability", 0, 1) &
         between("fraud_score", 0, 1)
+    )
+
+    # Commerce events: product fields present and every product/price rule
+    # holds (a NULL rule fails). Other events: a NULL rule means the field is
+    # absent, which is allowed; a present value must still pass.
+    product_rules_valid = (
+        when(
+            col("event_type").isin(COMMERCE_EVENT_TYPES),
+            all_of(
+                [col(name).isNotNull() for name in COMMERCE_REQUIRED_FIELDS]
+                + product_price_rules()
+            )
+        )
+        .otherwise(
+            all_of([coalesce(rule, lit(True)) for rule in product_price_rules()])
+        )
     )
 
     # A comparison on a NULL column is NULL, and a NULL filter drops the row from
     # both the valid and the ~valid branch. coalesce(..., False) sends it to the DLQ.
     return flattened_df.withColumn(
         "is_valid",
-        coalesce(required_fields_valid & value_rules_valid, lit(False))
+        coalesce(
+            required_fields_valid & value_rules_valid & product_rules_valid,
+            lit(False)
+        )
     )
 
 
