@@ -105,7 +105,10 @@ def get_user_features(user_id: int):
                         last_event_timestamp,
                         unique_products_interacted,
                         avg_engagement_score,
-                        avg_purchase_probability
+                        avg_purchase_probability,
+                        total_spend,
+                        session_count,
+                        recency_hours
                     FROM user_features
                     WHERE user_id = %s
                     """,

@@ -39,6 +39,9 @@ FEATURE_ROW = {
     "unique_products_interacted": 4,
     "avg_engagement_score": 15.99,
     "avg_purchase_probability": 0.75,
+    "total_spend": 2999.0,
+    "session_count": 3,
+    "recency_hours": 12.5,
 }
 
 
@@ -137,7 +140,21 @@ def test_features_found_includes_new_fields(monkeypatch, api):
     assert response == {"user_id": 42, "features": FEATURE_ROW}
     query, params = cursor.queries[0]
     assert params == (42,)
-    for column in ("avg_engagement_score", "avg_purchase_probability"):
+    for column in ("avg_engagement_score", "avg_purchase_probability",
+                   "total_spend", "session_count", "recency_hours"):
+        assert column in query
+    assert response["features"]["total_spend"] == 2999.0
+    assert response["features"]["session_count"] == 3
+    assert response["features"]["recency_hours"] == 12.5
+
+
+def test_existing_feature_fields_still_selected(monkeypatch, api):
+    cursor = use_db(monkeypatch, api, [FEATURE_ROW])
+    api.get_user_features(42)
+    query, _ = cursor.queries[0]
+    for column in ("total_events", "page_view_count", "product_view_count", "add_to_cart_count",
+                   "purchase_count", "search_count", "avg_event_price", "max_event_price",
+                   "last_event_timestamp", "unique_products_interacted"):
         assert column in query
 
 
