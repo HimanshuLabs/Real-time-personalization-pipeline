@@ -19,7 +19,15 @@ from pyspark.sql.types import (
 # id the producer can emit has a reference row. Importing producer.py does not
 # connect to Kafka: its Producer is only created inside main().
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data-generator"))
-from producer import NUM_USERS, PRODUCT_IDS, PRODUCTS, get_user_profile  # noqa: E402
+from producer import (  # noqa: E402
+    NUM_USERS,
+    PRODUCT_IDS,
+    PRODUCT_REFERENCE_PRICES,
+    PRODUCTS,
+    get_user_profile,
+    is_product_active,
+    user_reference_attributes,
+)
 
 
 USERS_CSV_PATH = "data/reference/users"
@@ -32,8 +40,6 @@ REPORT_PATH = "logs/reference_data_report.json"
 
 # Fixed anchor so signup_date doesn't change from one run to the next.
 SIGNUP_ANCHOR_DATE = date(2026, 1, 1)
-
-DEVICE_PREFERENCES = ["mobile", "desktop", "tablet"]
 
 PRODUCT_BRANDS = ["NovaTech", "UrbanCart", "FitCore", "HomeNest", "PrimeStyle"]
 
@@ -59,17 +65,17 @@ PRODUCTS_SCHEMA = StructType([
 def build_user_row(user_id):
     profile = get_user_profile(user_id)
 
-    # Own seed: random.Random(user_id) is the profile's stream, and reusing it
-    # would make device_preference mirror gender (same first 3-way choice).
-    rng = random.Random(f"users-dim:{user_id}")
+    # Device, signup offset and account status come from the producer, so the
+    # producer can skip inactive accounts.
+    attributes = user_reference_attributes(user_id)
 
     return (
         user_id,
         profile["user_segment"],
         profile["home_city"],
-        rng.choice(DEVICE_PREFERENCES),
-        SIGNUP_ANCHOR_DATE - timedelta(days=rng.randint(0, 1199)),
-        "inactive" if rng.randint(1, 25) == 1 else "active",
+        attributes["device_preference"],
+        SIGNUP_ANCHOR_DATE - timedelta(days=attributes["signup_days_ago"]),
+        attributes["account_status"],
     )
 
 
@@ -82,8 +88,8 @@ def build_product_row(category, product_name):
         product_name,
         category,
         rng.choice(PRODUCT_BRANDS),
-        float(rng.randint(999, 90998)),
-        product_id % 20 != 0,
+        PRODUCT_REFERENCE_PRICES[product_name],
+        is_product_active(product_id),
     )
 
 
