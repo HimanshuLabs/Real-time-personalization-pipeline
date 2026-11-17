@@ -4,13 +4,14 @@
   "tags": ["project1", "kafka", "fastapi", "prometheus"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "panels": [
     {
       "id": 1,
       "type": "stat",
       "title": "FastAPI Requests / sec",
+      "description": "All API requests. The API leaves its own /metrics scrapes out of every HTTP metric.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
@@ -18,16 +19,21 @@
           "legendFormat": "req/s"
         }
       ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      },
       "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 }
     },
     {
       "id": 2,
       "type": "stat",
       "title": "FastAPI p95 Latency",
+      "description": "From the instrumentator's high-resolution histogram (21 buckets from 10 ms), over all API requests; /metrics scrapes are not recorded.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_highr_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95"
         }
       ],
@@ -38,90 +44,32 @@
       "gridPos": { "h": 8, "w": 6, "x": 6, "y": 0 }
     },
     {
-      "id": 3,
+      "id": 10,
       "type": "stat",
-      "title": "Feature Freshness",
+      "title": "FastAPI 5xx Responses / sec",
+      "description": "Server errors per second. Shows 0, not 'No data', while the API is scraped and has served no 5xx.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "project1_feature_freshness_seconds",
-          "legendFormat": "freshness"
+          "expr": "sum(rate(http_requests_total{status=\"5xx\"}[1m])) or (0 * sum(rate(http_requests_total[1m])))",
+          "legendFormat": "5xx/s"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.000001 }
+            ]
+          }
+        },
         "overrides": []
       },
+      "options": { "colorMode": "background" },
       "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "PostgreSQL user_features Rows",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "project1_user_features_rows",
-          "legendFormat": "rows"
-        }
-      ],
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 }
-    },
-    {
-      "id": 5,
-      "type": "timeseries",
-      "title": "Kafka user_events Throughput",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"user_events\"}[1m]))",
-          "legendFormat": "user_events msg/s"
-        }
-      ],
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
-    },
-    {
-      "id": 6,
-      "type": "timeseries",
-      "title": "Kafka DLQ Ingress Rate",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"user_events_dlq\"}[1m]))",
-          "legendFormat": "dlq msg/s"
-        }
-      ],
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
-    },
-    {
-      "id": 7,
-      "type": "timeseries",
-      "title": "Kafka Consumer Group Lag",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "sum(kafka_consumergroup_lag) by (consumergroup, topic)",
-          "legendFormat": "{{consumergroup}} / {{topic}}"
-        }
-      ],
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
-    },
-    {
-      "id": 8,
-      "type": "timeseries",
-      "title": "Feature Freshness Over Time",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "project1_feature_freshness_seconds",
-          "legendFormat": "freshness seconds"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s" },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
     },
     {
       "id": 9,
@@ -150,7 +98,117 @@
         "overrides": []
       },
       "options": { "colorMode": "background" },
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 24 }
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Feature Freshness",
+      "description": "Age of the newest last_event_timestamp in user_features. -1 means the table is empty.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_feature_freshness_seconds",
+          "legendFormat": "freshness"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Features Computed Age",
+      "description": "Time since the newest features_computed_at in user_features, i.e. since the Gold run that was last published. -1 means the table is empty.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_features_computed_age_seconds",
+          "legendFormat": "computed age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 8 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "PostgreSQL user_features Rows",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_user_features_rows",
+          "legendFormat": "rows"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Kafka user_events Throughput",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"user_events\"}[1m]))",
+          "legendFormat": "user_events msg/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Kafka DLQ Ingress Rate",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"user_events_dlq\"}[1m]))",
+          "legendFormat": "dlq msg/s"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Kafka Messages Written per Topic",
+      "description": "End offset summed over partitions: every message ever written, since retention is unlimited. Replaces consumer-group lag, which was always empty because Spark keeps its offsets in checkpoints, not a consumer group.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (topic) (kafka_topic_partition_current_offset{topic=~\"user_events|user_events_dlq\"})",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Feature Freshness and Computed Age Over Time",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "project1_feature_freshness_seconds",
+          "legendFormat": "freshness seconds"
+        },
+        {
+          "expr": "project1_features_computed_age_seconds",
+          "legendFormat": "computed age seconds"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 }
     }
   ]
 }

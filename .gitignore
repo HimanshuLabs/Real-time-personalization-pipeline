@@ -17,6 +17,11 @@ checkpoints/
 spark-warehouse/
 metastore_db/
 
+# Local environment files (credentials); only the example is tracked
+.env
+.env.*
+!.env.example
+
 # Editor
 .vscode/
 
