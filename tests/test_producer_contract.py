@@ -1,39 +1,92 @@
 import importlib.util
+import os
+import signal
 import statistics
+import subprocess
+import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import confluent_kafka
 import pytest
-
-# CI installs only ruff and pytest; skip instead of failing when the
-# producer's runtime packages are missing.
-pytest.importorskip("faker")
-confluent_kafka = pytest.importorskip("confluent_kafka")
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_KEYS = [
-    "event_id", "session_id", "user_id", "user_name", "email", "gender", "age",
-    "membership_tier", "loyalty_points", "preferred_language", "home_city", "home_state",
-    "event_time", "event_type", "user_journey_stage", "user_segment", "is_prime_user",
-    "product_id", "product_name", "category", "quantity", "original_price",
-    "discount_percent", "discounted_price", "cart_value", "inventory_remaining",
-    "search_query", "time_on_page_sec", "scroll_depth_percent", "hover_duration_ms",
-    "session_duration_sec", "items_viewed_in_session", "repeat_product_view_count",
-    "time_since_last_event_ms", "recommendation_rank", "recommendation_clicked",
-    "recommendation_algorithm", "click_position", "engagement_score",
-    "purchase_probability", "cart_abandonment_probability", "ab_test_group",
-    "payment_method", "device_type", "operating_system", "browser", "network_type",
-    "app_version", "traffic_source", "campaign_id", "api_latency_ms",
-    "page_load_time_ms", "fraud_score", "country", "city", "ip_address",
-    "schema_version", "source",
+    "event_id",
+    "session_id",
+    "user_id",
+    "user_name",
+    "email",
+    "gender",
+    "age",
+    "membership_tier",
+    "loyalty_points",
+    "preferred_language",
+    "home_city",
+    "home_state",
+    "event_time",
+    "event_type",
+    "user_journey_stage",
+    "user_segment",
+    "is_prime_user",
+    "product_id",
+    "product_name",
+    "category",
+    "quantity",
+    "original_price",
+    "discount_percent",
+    "discounted_price",
+    "cart_value",
+    "inventory_remaining",
+    "search_query",
+    "time_on_page_sec",
+    "scroll_depth_percent",
+    "hover_duration_ms",
+    "session_duration_sec",
+    "items_viewed_in_session",
+    "repeat_product_view_count",
+    "time_since_last_event_ms",
+    "recommendation_rank",
+    "recommendation_clicked",
+    "recommendation_algorithm",
+    "click_position",
+    "engagement_score",
+    "purchase_probability",
+    "cart_abandonment_probability",
+    "ab_test_group",
+    "payment_method",
+    "device_type",
+    "operating_system",
+    "browser",
+    "network_type",
+    "app_version",
+    "traffic_source",
+    "campaign_id",
+    "api_latency_ms",
+    "page_load_time_ms",
+    "fraud_score",
+    "country",
+    "city",
+    "ip_address",
+    "schema_version",
+    "source",
 ]
 
 PROFILE_FIELDS = [
-    "user_name", "email", "gender", "age", "membership_tier", "loyalty_points",
-    "preferred_language", "home_city", "home_state", "user_segment", "is_prime_user",
+    "user_name",
+    "email",
+    "gender",
+    "age",
+    "membership_tier",
+    "loyalty_points",
+    "preferred_language",
+    "home_city",
+    "home_state",
+    "user_segment",
+    "is_prime_user",
 ]
 
 
@@ -107,7 +160,9 @@ def test_event_ids_unique(events):
 
 
 def test_every_category_has_products(producer, events):
-    empty = [category for category in producer.PRODUCT_CATEGORIES if not producer.PRODUCTS.get(category)]
+    empty = [
+        category for category in producer.PRODUCT_CATEGORIES if not producer.PRODUCTS.get(category)
+    ]
     assert not empty, f"categories without products: {empty}"
     assert not [event for event in events if event["product_name"] == "unknown"]
 
@@ -162,12 +217,19 @@ def test_non_commerce_events_have_no_product(producer, events):
 
 
 def test_commerce_events_have_product_and_prices(producer, commerce_events):
-    required = ["product_id", "product_name", "category", "quantity",
-                "original_price", "discount_percent", "discounted_price"]
+    required = [
+        "product_id",
+        "product_name",
+        "category",
+        "quantity",
+        "original_price",
+        "discount_percent",
+        "discounted_price",
+    ]
     for event in commerce_events:
         assert all(event[field] is not None for field in required), event
 
-        if event["event_type"] in producer.CART_STAGE_EVENT_TYPES:
+        if event["event_type"] in producer.CART_EVENT_TYPES:
             assert 1 <= event["quantity"] <= 3
             assert event["cart_value"] == round(event["discounted_price"] * event["quantity"], 2)
         else:
@@ -177,8 +239,11 @@ def test_commerce_events_have_product_and_prices(producer, commerce_events):
 
 def test_one_user_product_and_price_per_session(sessions):
     for session_events in sessions.values():
-        fixed = {(e["user_id"], e["product_id"], e["original_price"], e["discount_percent"])
-                 for e in session_events if e["product_id"] is not None}
+        fixed = {
+            (e["user_id"], e["product_id"], e["original_price"], e["discount_percent"])
+            for e in session_events
+            if e["product_id"] is not None
+        }
         assert len(fixed) <= 1, session_events
         assert len({e["user_id"] for e in session_events}) == 1
 
@@ -208,7 +273,10 @@ def test_order_placed_only_after_payment_success(sessions):
 
 
 RECOMMENDATION_FIELDS = [
-    "recommendation_rank", "recommendation_clicked", "recommendation_algorithm", "click_position",
+    "recommendation_rank",
+    "recommendation_clicked",
+    "recommendation_algorithm",
+    "click_position",
 ]
 
 
@@ -270,7 +338,9 @@ def test_session_counters_follow_session_state(sessions):
         for event in session_events:
             if event["event_type"] == "product_view":
                 views += 1
-            assert event["session_duration_sec"] == int((event_time(event) - started).total_seconds())
+            assert event["session_duration_sec"] == int(
+                (event_time(event) - started).total_seconds()
+            )
             assert event["items_viewed_in_session"] == views
             assert event["repeat_product_view_count"] == views
 
@@ -303,6 +373,31 @@ def test_location_mostly_home(producer, stream):
     assert all(e["country"] == producer.HOME_COUNTRY for e in stream if e["city"] == e["home_city"])
 
 
+def test_abroad_event_never_uses_home_city(producer, monkeypatch):
+    # Force the abroad branch and make the first two city draws equal the home city.
+    profile = producer.get_user_profile(42)
+    home_city = profile["home_city"]
+    city_draws = iter([home_city, home_city, "Elsewhere"])
+
+    class ScriptedFaker:
+        city_calls = 0
+
+        def country(self):
+            return "France"
+
+        def city(self):
+            ScriptedFaker.city_calls += 1
+            return next(city_draws)
+
+    monkeypatch.setattr(
+        producer, "random", type("AlwaysAbroad", (), {"random": staticmethod(lambda: 0.0)})
+    )
+    monkeypatch.setattr(producer, "fake", ScriptedFaker())
+
+    assert producer.draw_location(profile) == ("France", "Elsewhere")
+    assert ScriptedFaker.city_calls == 3
+
+
 def test_inventory_drops_on_purchase_and_restocks(producer, stream):
     low, high = producer.INITIAL_STOCK_RANGE
     last = {}
@@ -317,7 +412,7 @@ def test_inventory_drops_on_purchase_and_restocks(producer, stream):
         if product not in last:
             expected_before = None
         elif last[product] < producer.RESTOCK_BELOW:
-            expected_before = None      # restocked after the previous event
+            expected_before = None  # restocked after the previous event
         else:
             expected_before = last[product]
 
@@ -355,7 +450,7 @@ def test_remove_from_cart_ends_without_checkout(sessions):
             continue
         removed += 1
         assert types.index("add_to_cart") < types.index("remove_from_cart")
-        after = set(types[types.index("remove_from_cart") + 1:])
+        after = set(types[types.index("remove_from_cart") + 1 :])
         assert after <= {"logout"}, types
         assert not {"checkout_started", "payment_initiated", "payment_success"} & set(types)
     assert removed > 0
@@ -375,7 +470,7 @@ def test_coupon_only_between_checkout_and_payment(sessions):
     assert coupons > 0
 
 
-def test_new_event_types_placement(sessions):
+def test_ad_zoom_wishlist_and_feedback_events_follow_their_trigger(sessions):
     after = {
         "ad_impression": {"home_page_view"},
         "ad_click": {"ad_impression"},
@@ -471,3 +566,262 @@ def test_same_user_same_profile(producer, events):
     before = producer.get_user_profile(42)
     producer.get_user_profile.cache_clear()
     assert producer.get_user_profile(42) == before
+
+
+# --- running the producer: exit status, signals, NUM_USERS, broker address ----------
+
+PRODUCER_SCRIPT = ROOT / "data-generator" / "producer.py"
+
+
+class StubMessage:
+    def topic(self):
+        return "user_events"
+
+
+class StubProducer:
+    """Delivers queued events on poll/flush; can fail the first one or leave some queued."""
+
+    def __init__(self, fail_first=False, undelivered=0):
+        self.queued = []
+        self.fail_first = fail_first
+        self.undelivered = undelivered
+        self.produced = 0
+        self.flush_timeouts = []
+
+    def produce(self, topic, key, value, on_delivery):
+        self.produced += 1
+        self.queued.append(on_delivery)
+
+    def poll(self, timeout=0):
+        while self.queued:
+            callback = self.queued.pop(0)
+            failed = self.fail_first and self.produced == 1
+            callback("simulated broker error" if failed else None, StubMessage())
+
+    def flush(self, timeout):
+        self.flush_timeouts.append(timeout)
+        self.poll()
+        return self.undelivered
+
+
+def stop_after(calls):
+    count = 0
+
+    def pause():
+        nonlocal count
+        count += 1
+        if count == calls:
+            raise KeyboardInterrupt
+
+    return pause
+
+
+@pytest.fixture
+def fresh_stats(producer):
+    producer.delivery_stats.update(delivered=0, failed=0)
+    return producer.delivery_stats
+
+
+@pytest.mark.parametrize(
+    ("stub", "expected_status", "summary"),
+    [
+        (StubProducer(), 0, "delivered=3 failed=0 undelivered=0"),
+        (StubProducer(fail_first=True), 1, "delivered=2 failed=1 undelivered=0"),
+        (StubProducer(undelivered=2), 1, "delivered=3 failed=0 undelivered=2"),
+    ],
+    ids=["delivered_only", "a_delivery_failed", "undelivered_at_flush"],
+)
+def test_run_exit_status(producer, fresh_stats, capsys, stub, expected_status, summary):
+    status = producer.run(stub, producer.SessionPool(), pause=stop_after(3))
+
+    assert status == expected_status
+    assert stub.produced == 3
+    assert stub.flush_timeouts == [producer.FLUSH_TIMEOUT_SECONDS]
+    assert f"[producer] summary: {summary}" in capsys.readouterr().err
+
+
+def test_sigterm_takes_the_ctrl_c_stop_path(producer, fresh_stats, capsys):
+    originals = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    stub = StubProducer()
+    calls = 0
+
+    def pause():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)  # the handler interrupts this sleep
+
+    try:
+        producer.install_signal_handlers()
+        assert signal.getsignal(signal.SIGINT) is producer.stop_on_first_signal
+        assert signal.getsignal(signal.SIGTERM) is producer.stop_on_first_signal
+        started = time.monotonic()
+        status = producer.run(stub, producer.SessionPool(), pause=pause)
+        elapsed = time.monotonic() - started
+        # After the first stop signal, both are ignored for the rest of the shutdown.
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    finally:
+        for s, handler in originals.items():
+            signal.signal(s, handler)
+
+    assert status == 0
+    assert elapsed < 4
+    assert stub.produced == 2
+    assert stub.flush_timeouts == [producer.FLUSH_TIMEOUT_SECONDS]
+    assert "[producer] summary: delivered=2 failed=0 undelivered=0" in capsys.readouterr().err
+
+
+# The real producer in its own process with a stub Kafka client whose final flush
+# takes 1.5 seconds, so a second stop signal can land during it.
+SLOW_FLUSH_PRODUCER = """
+import sys, time
+sys.path.insert(0, {producer_dir!r})
+import producer
+
+class SlowFlushProducer:
+    def __init__(self, config):
+        self.queued = []
+
+    def produce(self, topic, key, value, on_delivery):
+        self.queued.append(on_delivery)
+        print("[stub] produced", file=sys.stderr, flush=True)
+
+    def poll(self, timeout=0):
+        while self.queued:
+            self.queued.pop(0)(None, None)
+
+    def flush(self, timeout):
+        print("[stub] flushing", file=sys.stderr, flush=True)
+        time.sleep(1.5)
+        self.poll()
+        return 0
+
+producer.Producer = SlowFlushProducer
+sys.exit(producer.main())
+"""
+
+
+def read_stderr_until(proc, marker, lines):
+    for line in proc.stderr:
+        lines.append(line)
+        if marker in line:
+            return
+    raise AssertionError(f"producer exited before {marker!r}: {''.join(lines)}")
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "second_during_flush"),
+    [
+        (signal.SIGINT, signal.SIGINT, True),
+        (signal.SIGINT, signal.SIGINT, False),
+        (signal.SIGTERM, signal.SIGINT, True),
+    ],
+    ids=["second_ctrl_c_during_flush", "two_sigint_back_to_back", "sigterm_then_sigint"],
+)
+def test_second_stop_signal_still_flushes_and_prints_the_summary(
+    first, second, second_during_flush
+):
+    # GNU timeout signals the child and then its process group; a user may press
+    # Ctrl+C twice. Only the first signal stops the producer.
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            SLOW_FLUSH_PRODUCER.format(producer_dir=str(PRODUCER_SCRIPT.parent)),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    lines = []
+    try:
+        read_stderr_until(proc, "[stub] produced", lines)
+        os.kill(proc.pid, first)
+        if second_during_flush:
+            read_stderr_until(proc, "[stub] flushing", lines)
+        os.kill(proc.pid, second)
+        _, rest = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    stderr = "".join(lines) + rest
+
+    assert proc.returncode == 0, stderr
+    assert "Traceback" not in stderr
+    assert "KeyboardInterrupt" not in stderr
+    assert "[producer] summary: delivered=" in stderr
+    assert "failed=0 undelivered=0" in stderr
+
+
+def test_small_num_users_produces_events_without_hanging(producer):
+    # Users 2 and 4 are inactive, so NUM_USERS=10 has 8 active users and a pool of 8.
+    code = (
+        "import sys, json\n"
+        f"sys.path.insert(0, {str(PRODUCER_SCRIPT.parent)!r})\n"
+        "import producer\n"
+        "pool = producer.SessionPool()\n"
+        "events = [pool.next_event() for _ in range(500)]\n"
+        "print(json.dumps([pool.max_active, len(events), sorted({e['user_id'] for e in events})]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "NUM_USERS": "10"},
+    )
+    assert result.returncode == 0, result.stderr
+
+    max_active, count, users = __import__("json").loads(result.stdout)
+    active = [u for u in range(1, 11) if producer.account_status(u) == "active"]
+    assert max_active == len(active) == 8
+    assert count == 500
+    assert set(users) <= set(active)
+
+
+def test_num_users_without_active_accounts_is_a_clear_error(producer, monkeypatch):
+    # Not reachable with the real seeds (user 1 is active), so force it.
+    monkeypatch.setattr(producer, "account_status", lambda user_id: "inactive")
+
+    with pytest.raises(ValueError, match="NUM_USERS=3 has no active accounts"):
+        producer.SessionPool(num_users=3)
+
+
+def test_num_users_below_1_exits_2_with_one_line_error():
+    result = subprocess.run(
+        [sys.executable, str(PRODUCER_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "NUM_USERS": "0", "KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:1"},
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == "[producer] error: NUM_USERS must be at least 1, got 0"
+    assert result.stdout == ""
+
+
+def load_fresh_producer(monkeypatch, **env):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    spec = importlib.util.spec_from_file_location("producer_env_under_test", PRODUCER_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_producer_config_reads_bootstrap_env_and_is_idempotent(monkeypatch):
+    monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS", raising=False)
+    default = load_fresh_producer(monkeypatch)
+    assert default.producer_config() == {
+        "bootstrap.servers": "localhost:9092",
+        "enable.idempotence": True,
+    }
+
+    custom = load_fresh_producer(monkeypatch, KAFKA_BOOTSTRAP_SERVERS="broker.test:19092")
+    assert custom.producer_config()["bootstrap.servers"] == "broker.test:19092"
+    assert "localhost:9092" not in PRODUCER_SCRIPT.read_text().replace(
+        'os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")', ""
+    )
