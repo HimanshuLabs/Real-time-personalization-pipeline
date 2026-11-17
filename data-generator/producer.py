@@ -2,13 +2,14 @@ import json
 import math
 import os
 import random
+import signal
 import sys
 import time
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from faker import Faker
 from confluent_kafka import Producer
+from faker import Faker
 
 fake = Faker()
 
@@ -17,6 +18,8 @@ fake = Faker()
 profile_fake = Faker()
 
 NUM_USERS = int(os.environ.get("NUM_USERS", "5000"))
+
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
 FLUSH_TIMEOUT_SECONDS = 10
 
@@ -49,7 +52,7 @@ EVENT_TYPES = [
     "coupon_applied",
     "delivery_tracking_view",
     "login",
-    "logout"
+    "logout",
 ]
 
 # Event types that concern a product. Must match COMMERCE_EVENT_TYPES in
@@ -72,7 +75,7 @@ COMMERCE_EVENT_TYPES = [
     "rating_given",
     "recommendation_impression",
     "recommendation_click",
-    "search_result_click"
+    "search_result_click",
 ]
 
 PRODUCT_CATEGORIES = [
@@ -83,70 +86,24 @@ PRODUCT_CATEGORIES = [
     "sports",
     "books",
     "grocery",
-    "toys"
+    "toys",
 ]
 
 PRODUCTS = {
-    "electronics": [
-        "iphone_15",
-        "macbook_air",
-        "sony_headphones",
-        "gaming_mouse",
-        "monitor_4k"
-    ],
-
-    "fashion": [
-        "nike_shoes",
-        "hoodie",
-        "cargo_pants",
-        "oversized_tshirt",
-        "jacket"
-    ],
-
-    "beauty": [
-        "facewash",
-        "moisturizer",
-        "serum",
-        "perfume"
-    ],
-
-    "home": [
-        "air_fryer",
-        "coffee_machine",
-        "vacuum_cleaner"
-    ],
-
-    "sports": [
-        "dumbbells",
-        "yoga_mat",
-        "cricket_bat"
-    ],
-
-    "books": [
-        "atomic_habits",
-        "sapiens",
-        "python_crash_course"
-    ],
-
-    "grocery": [
-        "basmati_rice",
-        "olive_oil",
-        "green_tea"
-    ],
-
-    "toys": [
-        "lego_set",
-        "rubiks_cube",
-        "rc_car"
-    ]
+    "electronics": ["iphone_15", "macbook_air", "sony_headphones", "gaming_mouse", "monitor_4k"],
+    "fashion": ["nike_shoes", "hoodie", "cargo_pants", "oversized_tshirt", "jacket"],
+    "beauty": ["facewash", "moisturizer", "serum", "perfume"],
+    "home": ["air_fryer", "coffee_machine", "vacuum_cleaner"],
+    "sports": ["dumbbells", "yoga_mat", "cricket_bat"],
+    "books": ["atomic_habits", "sapiens", "python_crash_course"],
+    "grocery": ["basmati_rice", "olive_oil", "green_tea"],
+    "toys": ["lego_set", "rubiks_cube", "rc_car"],
 }
 
 # Stable id per product: sorted names -> 10000 + index, built once.
 PRODUCT_IDS = {
     name: 10000 + index
-    for index, name in enumerate(
-        sorted(name for names in PRODUCTS.values() for name in names)
-    )
+    for index, name in enumerate(sorted(name for names in PRODUCTS.values() for name in names))
 }
 
 # Realistic list-price range (low, high) per category.
@@ -169,83 +126,43 @@ PRODUCT_REFERENCE_PRICES = {
     "sony_headphones": 29990.00,
     "gaming_mouse": 2499.00,
     "monitor_4k": 24999.00,
-
     "nike_shoes": 7995.00,
     "hoodie": 1999.00,
     "cargo_pants": 2499.00,
     "oversized_tshirt": 799.00,
     "jacket": 4999.00,
-
     "facewash": 349.00,
     "moisturizer": 599.00,
     "serum": 899.00,
     "perfume": 2999.00,
-
     "air_fryer": 6999.00,
     "coffee_machine": 12999.00,
     "vacuum_cleaner": 15999.00,
-
     "dumbbells": 2499.00,
     "yoga_mat": 999.00,
     "cricket_bat": 3499.00,
-
     "atomic_habits": 499.00,
     "sapiens": 599.00,
     "python_crash_course": 1499.00,
-
     "basmati_rice": 899.00,
     "olive_oil": 1199.00,
     "green_tea": 449.00,
-
     "lego_set": 4999.00,
     "rubiks_cube": 499.00,
     "rc_car": 2999.00,
 }
 
-USER_SEGMENTS = [
-    "new_user",
-    "returning_user",
-    "loyal_customer",
-    "high_spender",
-    "discount_hunter"
-]
+USER_SEGMENTS = ["new_user", "returning_user", "loyal_customer", "high_spender", "discount_hunter"]
 
-PAYMENT_METHODS = [
-    "upi",
-    "credit_card",
-    "debit_card",
-    "wallet",
-    "cash_on_delivery",
-    "net_banking"
-]
+PAYMENT_METHODS = ["upi", "credit_card", "debit_card", "wallet", "cash_on_delivery", "net_banking"]
 
-DEVICES = [
-    "mobile",
-    "desktop",
-    "tablet"
-]
+DEVICES = ["mobile", "desktop", "tablet"]
 
-OPERATING_SYSTEMS = [
-    "android",
-    "ios",
-    "windows",
-    "macos",
-    "linux"
-]
+OPERATING_SYSTEMS = ["android", "ios", "windows", "macos", "linux"]
 
-BROWSERS = [
-    "chrome",
-    "firefox",
-    "edge",
-    "safari"
-]
+BROWSERS = ["chrome", "firefox", "edge", "safari"]
 
-NETWORK_TYPES = [
-    "wifi",
-    "4g",
-    "5g",
-    "ethernet"
-]
+NETWORK_TYPES = ["wifi", "4g", "5g", "ethernet"]
 
 TRAFFIC_SOURCES = [
     "organic",
@@ -254,7 +171,7 @@ TRAFFIC_SOURCES = [
     "facebook_ads",
     "affiliate",
     "email_campaign",
-    "push_notification"
+    "push_notification",
 ]
 
 # A search uses a query that fits the session's category.
@@ -274,35 +191,29 @@ RECOMMENDATION_ALGORITHMS = [
     "content_based",
     "deep_learning",
     "trending",
-    "hybrid_v2"
+    "hybrid_v2",
 ]
 
-USER_JOURNEY_STAGES = [
-    "discovery",
-    "comparison",
-    "consideration",
-    "checkout",
-    "post_purchase"
-]
+USER_JOURNEY_STAGES = ["discovery", "comparison", "consideration", "checkout", "post_purchase"]
 
 
 MAX_ACTIVE_SESSIONS = 20
 
 # Funnel step probabilities; each step is one event.
-LOGIN_ENTRY_RATE = 0.30                # otherwise home_page_view
-AD_IMPRESSION_RATE = 0.20              # after home_page_view
-AD_CLICK_RATE = 0.25                   # of ad impressions
+LOGIN_ENTRY_RATE = 0.30  # otherwise home_page_view
+AD_IMPRESSION_RATE = 0.20  # after home_page_view
+AD_CLICK_RATE = 0.25  # of ad impressions
 SEARCH_RATE = 0.50
 RECOMMENDATION_BEFORE_VIEW_RATE = 0.25
-IMAGE_ZOOM_RATE = 0.20                 # after a product_view
-WISHLIST_RATE = 0.05                   # after a product_view
-WISHLIST_EXIT_RATE = 0.50              # session leaves the funnel after wishlist_add
-ADD_TO_CART_RATE = 0.18                # of sessions that viewed a product
-REMOVE_FROM_CART_RATE = 0.10           # of carts; no checkout afterwards
-CHECKOUT_RATE = 0.60                   # of carts kept
-COUPON_RATE = 0.20                     # of checkouts
-PAYMENT_SUCCESS_RATE = 0.85            # otherwise payment_failed
-FEEDBACK_RATE = 0.05                   # review or rating after order_placed
+IMAGE_ZOOM_RATE = 0.20  # after a product_view
+WISHLIST_RATE = 0.05  # after a product_view
+WISHLIST_EXIT_RATE = 0.50  # session leaves the funnel after wishlist_add
+ADD_TO_CART_RATE = 0.18  # of sessions that viewed a product
+REMOVE_FROM_CART_RATE = 0.10  # of carts; no checkout afterwards
+CHECKOUT_RATE = 0.60  # of carts kept
+COUPON_RATE = 0.20  # of checkouts
+PAYMENT_SUCCESS_RATE = 0.85  # otherwise payment_failed
+FEEDBACK_RATE = 0.05  # review or rating after order_placed
 LOGOUT_RATE = 0.40
 
 # Product and price fields: all None on non-commerce events.
@@ -317,8 +228,9 @@ PRODUCT_FIELDS = [
     "cart_value",
 ]
 
-# Cart events: the cart quantity applies and cart_value is set.
-CART_STAGE_EVENT_TYPES = {
+# Cart events: the cart quantity applies and cart_value is set. Must match
+# CART_EVENT_TYPES in spark-streaming/read_stream.py.
+CART_EVENT_TYPES = [
     "add_to_cart",
     "remove_from_cart",
     "checkout_started",
@@ -326,7 +238,7 @@ CART_STAGE_EVENT_TYPES = {
     "payment_success",
     "payment_failed",
     "order_placed",
-}
+]
 
 
 # user_journey_stage follows the event type; logout keeps the session's latest stage.
@@ -469,14 +381,14 @@ FUNNEL_STAGE_SCORES = {
 DEFAULT_STAGE_SCORE = -3.0
 STAGE_SCORE_NOISE = 0.4
 
-HOME_COUNTRY = "United States"   # the profiles are US (Faker en_US)
-ABROAD_RATE = 0.05               # events from a random other country
-HOME_CITY_RATE = 0.85            # events from the profile's home_city
+HOME_COUNTRY = "United States"  # the profiles are US (Faker en_US)
+ABROAD_RATE = 0.05  # events from a random other country
+HOME_CITY_RATE = 0.85  # events from the profile's home_city
 
 INITIAL_STOCK_RANGE = (50, 500)
 RESTOCK_BELOW = 5
 
-MAX_INT32 = 2_147_483_647   # Bronze stores time_since_last_event_ms as a 32-bit int
+MAX_INT32 = 2_147_483_647  # Bronze stores time_since_last_event_ms as a 32-bit int
 
 
 def draw_purchase_probability(event_type):
@@ -492,7 +404,11 @@ def draw_location(profile):
         country = fake.country()
         while country.startswith("United States"):
             country = fake.country()
-        return country, fake.city()
+        # Faker's city names can repeat the home city; an abroad event never uses it.
+        city = fake.city()
+        while city == profile["home_city"]:
+            city = fake.city()
+        return country, city
 
     # Share of the at-home events that use home_city, so HOME_CITY_RATE holds overall.
     if random.random() < HOME_CITY_RATE / (1 - ABROAD_RATE):
@@ -520,23 +436,21 @@ class Session:
 
         # Within +/-10% of the product's list price; fixed for the session.
         self.original_price = round(
-            PRODUCT_REFERENCE_PRICES[self.product_name] * random.uniform(0.9, 1.1),
-            2
+            PRODUCT_REFERENCE_PRICES[self.product_name] * random.uniform(0.9, 1.1), 2
         )
         self.discount_percent = draw_discount_percent()
         self.discounted_price = round(
-            self.original_price - self.original_price * self.discount_percent / 100,
-            2
+            self.original_price - self.original_price * self.discount_percent / 100, 2
         )
 
         self.cart_quantity = None
         self.steps = plan_session_steps()
         self.position = 0
 
-        self.started_at = None       # time of the session's first event
-        self.product_views = 0       # product_view events so far, this one included
-        self.recommendation = None   # (rank, algorithm) shown by the last impression
-        self.journey_stage = None    # stage of the latest event with a stage
+        self.started_at = None  # time of the session's first event
+        self.product_views = 0  # product_view events so far, this one included
+        self.recommendation = None  # (rank, algorithm) shown by the last impression
+        self.journey_stage = None  # stage of the latest event with a stage
 
         # Device context and payment method, fixed for the session.
         self.device_type = random.choice(DEVICES)
@@ -595,7 +509,7 @@ class Session:
         if event_type not in COMMERCE_EVENT_TYPES:
             return dict.fromkeys(PRODUCT_FIELDS)
 
-        in_cart = event_type in CART_STAGE_EVENT_TYPES
+        in_cart = event_type in CART_EVENT_TYPES
         quantity = self.cart_quantity if in_cart else 1
 
         return {
@@ -613,20 +527,33 @@ class Session:
 class SessionPool:
     """Up to max_active concurrent sessions; a finished one is replaced."""
 
-    def __init__(self, max_active=MAX_ACTIVE_SESSIONS):
-        # One session per user at a time, so never more sessions than users.
-        self.max_active = min(max_active, NUM_USERS)
+    def __init__(self, max_active=MAX_ACTIVE_SESSIONS, num_users=None):
+        self.num_users = NUM_USERS if num_users is None else num_users
+        if self.num_users < 1:
+            raise ValueError(f"NUM_USERS must be at least 1, got {self.num_users}")
+
+        active_users = sum(
+            account_status(user_id) == "active" for user_id in range(1, self.num_users + 1)
+        )
+        if active_users == 0:
+            raise ValueError(
+                f"NUM_USERS={self.num_users} has no active accounts; use a larger NUM_USERS"
+            )
+
+        # One session per active user at a time, so never more sessions than
+        # active users; otherwise start_session could never find a free user.
+        self.max_active = min(max_active, active_users)
         self.active = []
         self.sessions_completed = 0
-        self.last_event_at = {}   # user_id -> time of that user's previous event
-        self.stock = {}           # product_name -> units in stock
+        self.last_event_at = {}  # user_id -> time of that user's previous event
+        self.stock = {}  # product_name -> units in stock
 
     def start_session(self):
         # Active accounts only, one session per user at a time.
         busy_users = {session.user_id for session in self.active}
-        user_id = random.randint(1, NUM_USERS)
+        user_id = random.randint(1, self.num_users)
         while user_id in busy_users or account_status(user_id) != "active":
-            user_id = random.randint(1, NUM_USERS)
+            user_id = random.randint(1, self.num_users)
         self.active.append(Session(user_id))
 
     def next_event(self):
@@ -682,7 +609,6 @@ class SessionPool:
 
 @lru_cache(maxsize=None)
 def get_user_profile(user_id):
-
     rng = random.Random(user_id)
 
     profile_fake.seed_instance(user_id)
@@ -703,7 +629,7 @@ def get_user_profile(user_id):
 
 
 SIGNUP_MAX_DAYS_AGO = 1199
-INACTIVE_ACCOUNT_ODDS = 25    # 1 account in 25 is inactive
+INACTIVE_ACCOUNT_ODDS = 25  # 1 account in 25 is inactive
 
 
 @lru_cache(maxsize=None)
@@ -734,7 +660,6 @@ ACTIVE_PRODUCTS = {
 
 
 def build_event(session, event_type, now, time_since_last_event_ms, inventory_remaining):
-
     user_id = session.user_id
 
     profile = get_user_profile(user_id)
@@ -745,47 +670,28 @@ def build_event(session, event_type, now, time_since_last_event_ms, inventory_re
 
     country, city = draw_location(profile)
 
-    session_duration_sec = int(
-        (now - session.started_at).total_seconds()
-    )
+    session_duration_sec = int((now - session.started_at).total_seconds())
 
-    time_on_page_sec = round(
-        random.uniform(1, 900),
-        2
-    )
+    time_on_page_sec = round(random.uniform(1, 900), 2)
 
-    scroll_depth_percent = random.randint(
-        0,
-        100
-    )
+    scroll_depth_percent = random.randint(0, 100)
 
-    hover_duration_ms = random.randint(
-        0,
-        20000
-    )
+    hover_duration_ms = random.randint(0, 20000)
 
     # One product per session, so every product_view so far is of this product.
     repeat_product_view_count = session.product_views
 
     engagement_score = round(
-        (
-            time_on_page_sec * 0.4
-            + scroll_depth_percent * 0.3
-            + repeat_product_view_count * 2
-        ) / 10,
-        2
+        (time_on_page_sec * 0.4 + scroll_depth_percent * 0.3 + repeat_product_view_count * 2) / 10,
+        2,
     )
 
     purchase_probability = draw_purchase_probability(event_type)
 
     return {
-
         "event_id": fake.uuid4(),
-
         "session_id": session.session_id,
-
         "user_id": user_id,
-
         "user_name": profile["user_name"],
         "email": profile["email"],
         "gender": profile["gender"],
@@ -795,217 +701,143 @@ def build_event(session, event_type, now, time_since_last_event_ms, inventory_re
         "preferred_language": profile["preferred_language"],
         "home_city": profile["home_city"],
         "home_state": profile["home_state"],
-
-
         "event_time": now.isoformat(),
-
         "event_type": event_type,
-
-        "user_journey_stage":
-            session.journey_stage,
-
-        "user_segment":
-            profile["user_segment"],
-
-        "is_prime_user":
-            profile["is_prime_user"],
-
-        "product_id":
-            product["product_id"],
-
-        "product_name":
-            product["product_name"],
-
-        "category":
-            product["category"],
-
-        "quantity":
-            product["quantity"],
-
-        "original_price":
-            product["original_price"],
-
-        "discount_percent":
-            product["discount_percent"],
-
-        "discounted_price":
-            product["discounted_price"],
-
-        "cart_value":
-            product["cart_value"],
-
-        "inventory_remaining":
-            inventory_remaining,
-
-        "search_query":
-            session.search_query(event_type),
-
-        "time_on_page_sec":
-            time_on_page_sec,
-
-        "scroll_depth_percent":
-            scroll_depth_percent,
-
-        "hover_duration_ms":
-            hover_duration_ms,
-
-        "session_duration_sec":
-            session_duration_sec,
-
-        "items_viewed_in_session":
-            session.product_views,
-
-        "repeat_product_view_count":
-            repeat_product_view_count,
-
-        "time_since_last_event_ms":
-            time_since_last_event_ms,
-
-        "recommendation_rank":
-            recommendation["rank"],
-
-        "recommendation_clicked":
-            recommendation["clicked"],
-
-        "recommendation_algorithm":
-            recommendation["algorithm"],
-
-        "click_position":
-            recommendation["click_position"],
-
-        "engagement_score":
-            engagement_score,
-
-        "purchase_probability":
-            purchase_probability,
-
-        "cart_abandonment_probability":
-            round(random.uniform(0, 1), 4),
-
-        "ab_test_group":
-            random.choice(["A", "B", "C"]),
-
-        "payment_method":
-            session.payment_method if event_type in PAYMENT_EVENT_TYPES else None,
-
-        "device_type":
-            session.device_type,
-
-        "operating_system":
-            session.operating_system,
-
-        "browser":
-            session.browser,
-
-        "network_type":
-            session.network_type,
-
-        "app_version":
-            session.app_version,
-
-        "traffic_source":
-            random.choice(TRAFFIC_SOURCES),
-
-        "campaign_id":
-            random.randint(1000, 9999),
-
-        "api_latency_ms":
-            random.randint(20, 2000),
-
-        "page_load_time_ms":
-            random.randint(100, 8000),
-
-        "fraud_score":
-            round(random.uniform(0, 1), 4),
-
-        "country":
-            country,
-
-        "city":
-            city,
-
-        "ip_address":
-            fake.ipv4(),
-
+        "user_journey_stage": session.journey_stage,
+        "user_segment": profile["user_segment"],
+        "is_prime_user": profile["is_prime_user"],
+        "product_id": product["product_id"],
+        "product_name": product["product_name"],
+        "category": product["category"],
+        "quantity": product["quantity"],
+        "original_price": product["original_price"],
+        "discount_percent": product["discount_percent"],
+        "discounted_price": product["discounted_price"],
+        "cart_value": product["cart_value"],
+        "inventory_remaining": inventory_remaining,
+        "search_query": session.search_query(event_type),
+        "time_on_page_sec": time_on_page_sec,
+        "scroll_depth_percent": scroll_depth_percent,
+        "hover_duration_ms": hover_duration_ms,
+        "session_duration_sec": session_duration_sec,
+        "items_viewed_in_session": session.product_views,
+        "repeat_product_view_count": repeat_product_view_count,
+        "time_since_last_event_ms": time_since_last_event_ms,
+        "recommendation_rank": recommendation["rank"],
+        "recommendation_clicked": recommendation["clicked"],
+        "recommendation_algorithm": recommendation["algorithm"],
+        "click_position": recommendation["click_position"],
+        "engagement_score": engagement_score,
+        "purchase_probability": purchase_probability,
+        "cart_abandonment_probability": round(random.uniform(0, 1), 4),
+        "ab_test_group": random.choice(["A", "B", "C"]),
+        "payment_method": session.payment_method if event_type in PAYMENT_EVENT_TYPES else None,
+        "device_type": session.device_type,
+        "operating_system": session.operating_system,
+        "browser": session.browser,
+        "network_type": session.network_type,
+        "app_version": session.app_version,
+        "traffic_source": random.choice(TRAFFIC_SOURCES),
+        "campaign_id": random.randint(1000, 9999),
+        "api_latency_ms": random.randint(20, 2000),
+        "page_load_time_ms": random.randint(100, 8000),
+        "fraud_score": round(random.uniform(0, 1), 4),
+        "country": country,
+        "city": city,
+        "ip_address": fake.ipv4(),
         "schema_version": "4.0",
-
-        "source":
-            "real-time-personalization-generator"
+        "source": "real-time-personalization-generator",
     }
 
 
-session_pool = SessionPool()
+# Created on first use, so importing this module never validates NUM_USERS.
+_default_pool = None
 
 
 def generate_event():
-    # Next event from a random active session.
-    return session_pool.next_event()
+    # Next event from a random active session of the shared pool.
+    global _default_pool
+    if _default_pool is None:
+        _default_pool = SessionPool()
+    return _default_pool.next_event()
 
 
 def on_delivery(err, msg):
-
     if err is not None:
         delivery_stats["failed"] += 1
         print(
             f"[producer] delivery failed: topic={msg.topic()} error={err}",
             file=sys.stderr,
-            flush=True
+            flush=True,
         )
     else:
         delivery_stats["delivered"] += 1
 
 
 def produce_event(producer, event):
-
     value = json.dumps(event).encode("utf-8")
 
     # Keyed by user_id so each user's events stay in order on one partition.
     key = str(event["user_id"])
 
     try:
-        producer.produce(
-            "user_events",
-            key=key,
-            value=value,
-            on_delivery=on_delivery
-        )
+        producer.produce("user_events", key=key, value=value, on_delivery=on_delivery)
     except BufferError:
         # Local queue full: serve callbacks for up to 1s, then retry once.
         producer.poll(1)
-        producer.produce(
-            "user_events",
-            key=key,
-            value=value,
-            on_delivery=on_delivery
-        )
+        producer.produce("user_events", key=key, value=value, on_delivery=on_delivery)
 
     # Serve delivery callbacks without blocking.
     producer.poll(0)
 
 
-def main():
+def producer_config():
+    return {
+        "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
+        # Idempotent producer: the broker drops retried duplicates and keeps
+        # each partition in send order, so a retry can neither duplicate nor
+        # reorder a user's events (one user = one key = one partition).
+        "enable.idempotence": True,
+    }
 
-    producer = Producer({
-        "bootstrap.servers": "localhost:9092"
-    })
 
+def stop_on_first_signal(signum, frame):
+    # The first SIGINT or SIGTERM stops the producer. Later ones are ignored for
+    # the rest of the shutdown (GNU timeout signals the child and then its
+    # process group; a user may press Ctrl+C twice), so the final flush, which
+    # FLUSH_TIMEOUT_SECONDS bounds, and the summary always run. Ignoring them
+    # here, before raising, also drops a second signal that is already pending.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
+def install_signal_handlers():
+    # SIGTERM stops the producer exactly like Ctrl+C.
+    signal.signal(signal.SIGINT, stop_on_first_signal)
+    signal.signal(signal.SIGTERM, stop_on_first_signal)
+
+
+def pause_between_events():
+    time.sleep(random.uniform(0.05, 1.5))
+
+
+def exit_status(undelivered):
+    # 1 if any event failed or was still queued after the final flush.
+    return 1 if delivery_stats["failed"] or undelivered else 0
+
+
+def run(producer, pool, pause=pause_between_events):
+    """Produce until Ctrl+C or SIGTERM, flush, print the summary, return the exit status."""
     try:
         while True:
-
-            event = generate_event()
+            event = pool.next_event()
 
             produce_event(producer, event)
 
-            print(
-                json.dumps(
-                    event,
-                    indent=2
-                )
-            )
+            print(json.dumps(event, indent=2))
 
-            time.sleep(
-                random.uniform(0.05, 1.5)
-            )
+            pause()
 
     except KeyboardInterrupt:
         pass
@@ -1016,9 +848,23 @@ def main():
             f"[producer] summary: delivered={delivery_stats['delivered']} "
             f"failed={delivery_stats['failed']} undelivered={undelivered}",
             file=sys.stderr,
-            flush=True
+            flush=True,
         )
+
+    return exit_status(undelivered)
+
+
+def main():
+    install_signal_handlers()
+
+    try:
+        pool = SessionPool()
+    except ValueError as exc:
+        print(f"[producer] error: {exc}", file=sys.stderr, flush=True)
+        return 2
+
+    return run(Producer(producer_config()), pool)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
