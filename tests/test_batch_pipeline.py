@@ -9,16 +9,9 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("pyspark")
-# create_reference_data.py imports producer.py, which needs these.
-pytest.importorskip("faker")
-pytest.importorskip("confluent_kafka")
-
-from pyspark.sql import SparkSession  # noqa: E402
-
-from test_stream_validation import PRODUCT_AND_PRICE_FIELDS, VALID_EVENT  # noqa: E402
-
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import lit
+from test_stream_validation import PRODUCT_AND_PRICE_FIELDS, VALID_EVENT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,6 +19,7 @@ SCRIPTS = [
     "reference-data/create_reference_data.py",
     "spark-batch/bronze_to_silver.py",
     "spark-batch/silver_to_gold.py",
+    "spark-batch/query_gold_features.py",
 ]
 
 # Non-commerce events carry no product or price.
@@ -57,23 +51,73 @@ def event(event_id, user_id, event_type, event_time, session_id, **overrides):
 # DECIMAL rounds that to 1126.04, while AVG on DOUBLE gives 1126.03.
 # User 3 has no commerce event.
 BRONZE_EVENTS = [
-    event("u1-view-1", 1, "home_page_view", "2026-10-25T10:00:00+00:00", "s-1a",
-          user_name="Old Name", membership_tier="free", **NO_PRODUCT),
-    event("u1-view-2", 1, "home_page_view", "2026-10-25T10:05:00+00:00", "s-1b",
-          user_name="Old Name", membership_tier="free", **NO_PRODUCT),
-    event("u1-view-2", 1, "home_page_view", "2026-10-25T10:05:00+00:00", "s-1b",
-          user_name="Old Name", membership_tier="free", **NO_PRODUCT),
-    event("u1-buy-1", 1, "payment_success", "2026-10-25T10:10:00+00:00", "s-1b",
-          user_name="New Name", membership_tier="premium", quantity=2, cart_value=1800.0),
-    event("u2-view-1", 2, "product_view", "2026-10-25T11:00:00+00:00", "s-2",
-          original_price=1200.0, discounted_price=1085.49),
-    event("u2-view-ghost", 2, "product_view", "2026-10-25T11:01:00+00:00", "s-2",
-          product_id=99999, product_name="ghost_product", category="home",
-          original_price=1200.0, discounted_price=1166.58),
+    event(
+        "u1-view-1",
+        1,
+        "home_page_view",
+        "2026-10-25T10:00:00+00:00",
+        "s-1a",
+        user_name="Earlier Name",
+        membership_tier="free",
+        **NO_PRODUCT,
+    ),
+    event(
+        "u1-view-2",
+        1,
+        "home_page_view",
+        "2026-10-25T10:05:00+00:00",
+        "s-1b",
+        user_name="Earlier Name",
+        membership_tier="free",
+        **NO_PRODUCT,
+    ),
+    event(
+        "u1-view-2",
+        1,
+        "home_page_view",
+        "2026-10-25T10:05:00+00:00",
+        "s-1b",
+        user_name="Earlier Name",
+        membership_tier="free",
+        **NO_PRODUCT,
+    ),
+    event(
+        "u1-buy-1",
+        1,
+        "payment_success",
+        "2026-10-25T10:10:00+00:00",
+        "s-1b",
+        user_name="Latest Name",
+        membership_tier="premium",
+        quantity=2,
+        cart_value=1800.0,
+    ),
+    event(
+        "u2-view-1",
+        2,
+        "product_view",
+        "2026-10-25T11:00:00+00:00",
+        "s-2",
+        original_price=1200.0,
+        discounted_price=1085.49,
+    ),
+    event(
+        "u2-view-ghost",
+        2,
+        "product_view",
+        "2026-10-25T11:01:00+00:00",
+        "s-2",
+        product_id=99999,
+        product_name="ghost_product",
+        category="home",
+        original_price=1200.0,
+        discounted_price=1166.58,
+    ),
     event("u3-login", 3, "login", "2026-10-25T12:00:00+00:00", "s-3", **NO_PRODUCT),
 ]
 
-EXISTING_GOLD_SCHEMA = [
+# Gold's columns and types, in order.
+GOLD_SCHEMA = [
     ("user_id", "int"),
     ("user_name", "string"),
     ("membership_tier", "string"),
@@ -89,9 +133,6 @@ EXISTING_GOLD_SCHEMA = [
     ("avg_purchase_probability", "double"),
     ("last_event_timestamp", "timestamp"),
     ("unique_products_interacted", "bigint"),
-]
-
-NEW_GOLD_SCHEMA = [
     ("total_spend", "double"),
     ("session_count", "bigint"),
     ("features_computed_at", "timestamp"),
@@ -104,8 +145,7 @@ def pipeline(tmp_path_factory):
     root = tmp_path_factory.mktemp("pipeline")
 
     spark = (
-        SparkSession.builder
-        .master("local[1]")
+        SparkSession.builder.master("local[1]")
         .appName("test_batch_pipeline")
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.ui.enabled", "false")
@@ -127,12 +167,24 @@ def pipeline(tmp_path_factory):
         read_stream.build_validated(read_stream.parse_events(raw_df))
     )
     assert invalid_df.count() == 0
-    valid_df.write.mode("overwrite").parquet(str(root / "data" / "bronze" / "user_events"))
+    # Plus one row the stream would have rejected (NULL event_type), written
+    # directly, so Silver's quality filter has something to drop.
+    filtered_out = (
+        valid_df.limit(1)
+        .withColumn("event_id", lit("u9-null-event-type"))
+        .withColumn("user_id", lit(9))
+        .withColumn("event_type", lit(None).cast("string"))
+    )
+    valid_df.union(filtered_out).write.mode("overwrite").parquet(
+        str(root / "data" / "bronze" / "user_events")
+    )
 
+    # Run from another directory: every path must come from PROJECT1_ROOT.
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
     for script in SCRIPTS:
         result = subprocess.run(
             [sys.executable, str(ROOT / script)],
-            cwd=root,
+            cwd=elsewhere,
             env={**_clean_env(), "PROJECT1_ROOT": str(root)},
             capture_output=True,
             text=True,
@@ -152,6 +204,10 @@ def pipeline(tmp_path_factory):
         "gold_schema": [(field.name, field.dataType.simpleString()) for field in gold.schema],
         "account_status": {row.user_id: row.account_status for row in users_dim.collect()},
         "is_active": {row.product_id: row.is_active for row in products_dim.collect()},
+        "silver_report": json.loads((root / "logs" / "silver_enrichment_report.json").read_text()),
+        "reference_report": json.loads((root / "logs" / "reference_data_report.json").read_text()),
+        "reference_csv_dir_exists": (root / "data" / "reference").exists(),
+        "elsewhere_contents": sorted(p.name for p in elsewhere.iterdir()),
     }
     spark.stop()
 
@@ -173,14 +229,18 @@ def test_silver_keeps_event_user_segment(pipeline):
     assert {row["user_segment"] for row in pipeline["silver"]} == {"segment_from_event"}
 
 
-def test_silver_has_no_price_column(pipeline):
+def test_silver_has_no_bare_price_column_and_has_dim_reference_price(pipeline):
+    # Silver's prices are the event's own original_price / discounted_price and
+    # the products dim's list price, reference_price; none is called just "price".
     assert "price" not in pipeline["silver_columns"]
     assert "reference_price" in pipeline["silver_columns"]
 
 
 def test_silver_product_reference_missing_only_for_unknown_products(pipeline):
     assert not [row for row in pipeline["silver"] if row["is_user_reference_missing"]]
-    missing = sorted(row["event_id"] for row in pipeline["silver"] if row["is_product_reference_missing"])
+    missing = sorted(
+        row["event_id"] for row in pipeline["silver"] if row["is_product_reference_missing"]
+    )
     # Events without a product are not missing a reference.
     assert missing == ["u2-view-ghost"]
 
@@ -190,8 +250,8 @@ def test_gold_one_row_per_user(pipeline):
     assert sorted(pipeline["gold"]) == [1, 2, 3]
 
 
-def test_gold_schema_keeps_existing_columns_and_appends_new(pipeline):
-    assert pipeline["gold_schema"] == EXISTING_GOLD_SCHEMA + NEW_GOLD_SCHEMA
+def test_gold_schema_columns_and_types_in_order(pipeline):
+    assert pipeline["gold_schema"] == GOLD_SCHEMA
 
 
 def test_gold_price_features_use_commerce_events_only(pipeline):
@@ -208,7 +268,7 @@ def test_gold_price_features_use_commerce_events_only(pipeline):
     assert user_3["unique_products_interacted"] == 0
 
 
-def test_gold_new_columns(pipeline):
+def test_gold_spend_sessions_and_recency(pipeline):
     gold = pipeline["gold"]
 
     assert [gold[u]["total_spend"] for u in (1, 2, 3)] == [1800.0, 0.0, 0.0]
@@ -218,7 +278,9 @@ def test_gold_new_columns(pipeline):
     assert len(computed_at) == 1
 
     for row in gold.values():
-        micros = (row["features_computed_at"] - row["last_event_timestamp"]) // timedelta(microseconds=1)
+        micros = (row["features_computed_at"] - row["last_event_timestamp"]) // timedelta(
+            microseconds=1
+        )
         expected = (Decimal(micros) / Decimal(3_600_000_000)).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
@@ -226,12 +288,12 @@ def test_gold_new_columns(pipeline):
         assert row["recency_hours"] > 0
 
 
-def test_gold_counts_for_user_1(pipeline):
+def test_gold_counts_and_latest_profile_for_user_1(pipeline):
     user_1 = pipeline["gold"][1]
     assert user_1["page_view_count"] == 2
     assert user_1["purchase_count"] == 1
     assert user_1["total_events"] == 3
-    assert user_1["user_name"] == "New Name"
+    assert user_1["user_name"] == "Latest Name"
     assert user_1["membership_tier"] == "premium"
 
 
@@ -254,7 +316,84 @@ def test_dim_status_matches_producer_rules(pipeline):
     is_active = pipeline["is_active"]
 
     assert len(account_status) == producer.NUM_USERS
-    assert all(status == producer.account_status(user_id) for user_id, status in account_status.items())
+    assert all(
+        status == producer.account_status(user_id) for user_id, status in account_status.items()
+    )
 
     assert sorted(is_active) == sorted(producer.PRODUCT_IDS.values())
     assert all(active == producer.is_product_active(pid) for pid, active in is_active.items())
+
+
+def test_scripts_resolve_paths_from_project1_root(pipeline):
+    # The scripts ran from an empty directory and wrote only under PROJECT1_ROOT.
+    assert pipeline["elsewhere_contents"] == []
+    assert pipeline["reference_report"]["user_reference_count"] == 5000
+
+
+def test_silver_report_counts(pipeline):
+    report = pipeline["silver_report"]
+    # 8 Bronze rows: 7 events (one event_id twice) + 1 with a NULL event_type.
+    assert report["bronze_rows"] == 8
+    assert report["rows_dropped_by_filters"] == 1
+    assert report["duplicates_removed"] == 1
+    # Counted on the Silver actually written.
+    assert report["silver_record_count"] == len(pipeline["silver"]) == 6
+    assert report["bronze_rows"] == (
+        report["rows_dropped_by_filters"]
+        + report["duplicates_removed"]
+        + report["silver_record_count"]
+    )
+    assert report["missing_user_reference_count"] == 0
+    assert report["missing_product_reference_count"] == 1
+    assert report["silver_path"] == "data/silver/user_events"
+
+
+BATCH_SCRIPTS = [*SCRIPTS, "spark-batch/publish_gold_to_postgres.py"]
+
+
+def test_reference_data_writes_parquet_dims_only(pipeline):
+    assert not pipeline["reference_csv_dir_exists"]
+    assert pipeline["reference_report"] == {
+        "user_reference_count": 5000,
+        "product_reference_count": 29,
+        "users_dimension_path": "data/dim/users",
+        "products_dimension_path": "data/dim/products",
+    }
+
+
+def test_batch_scripts_have_main_and_no_import_side_effects():
+    # Fresh interpreter, so this test module's own SparkSession can't hide one.
+    code = (
+        "import importlib.util, sys\n"
+        "from pyspark import SparkContext\n"
+        f"for i, path in enumerate({[str(ROOT / s) for s in BATCH_SCRIPTS]!r}):\n"
+        "    spec = importlib.util.spec_from_file_location(f'batch_{i}', path)\n"
+        "    module = importlib.util.module_from_spec(spec)\n"
+        "    spec.loader.exec_module(module)\n"
+        "    assert callable(module.main), path\n"
+        "    assert SparkContext._active_spark_context is None, f'import started Spark: {path}'\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=_clean_env(),
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "ok"
+
+
+def test_silver_to_gold_requires_silver(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "spark-batch" / "silver_to_gold.py")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**_clean_env(), "PROJECT1_ROOT": str(tmp_path)},
+    )
+    assert result.returncode != 0
+    assert "Silver path does not exist. Run spark-batch/bronze_to_silver.py first" in result.stderr
+    assert not (tmp_path / "data" / "gold").exists()
