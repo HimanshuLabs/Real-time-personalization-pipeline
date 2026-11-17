@@ -1,4 +1,6 @@
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from pyspark.sql import SparkSession
 
@@ -22,34 +24,26 @@ COMMERCE_EVENT_TYPES = [
     "rating_given",
     "recommendation_impression",
     "recommendation_click",
-    "search_result_click"
+    "search_result_click",
 ]
 
-spark = (
-    SparkSession.builder
-    .appName("SilverToGoldUserFeatures")
-    .config("spark.sql.session.timeZone", "UTC")
-    .getOrCreate()
-)
+# data/ and logs/ resolve from PROJECT1_ROOT (default: the repository root), like
+# spark-streaming/read_stream.py, so the script works from any directory.
+PROJECT_ROOT = os.environ.get("PROJECT1_ROOT", str(Path(__file__).resolve().parents[1]))
 
-spark.sparkContext.setLogLevel("WARN")
 
-silver_df = spark.read.parquet(
-    "data/silver/user_events"
-)
+def project_path(relative_path):
+    return os.path.join(PROJECT_ROOT, relative_path)
 
-silver_df.createOrReplaceTempView(
-    "silver_user_events"
-)
 
-# One timestamp for the whole run; recency_hours is measured against it.
-features_computed_at = datetime.now(timezone.utc)
+SILVER_PATH = "data/silver/user_events"
+GOLD_PATH = "data/gold/user_features"
 
 commerce_event_types_sql = ", ".join(f"'{event_type}'" for event_type in COMMERCE_EVENT_TYPES)
 
 # Averages and sums run on DECIMAL so the result does not depend on the order
 # Spark adds the rows; each is rounded, then cast back to DOUBLE.
-gold_user_features = spark.sql(f"""
+GOLD_FEATURES_SQL = f"""
 
     SELECT
 
@@ -178,22 +172,45 @@ gold_user_features = spark.sql(f"""
     GROUP BY
         user_id
 
-""", args={"features_computed_at": features_computed_at})
+"""
 
-gold_user_features.write.mode(
-    "overwrite"
-).parquet(
-    "data/gold/user_features"
-)
 
-print("Gold user_features written successfully")
+def main():
+    spark = (
+        SparkSession.builder.appName("SilverToGoldUserFeatures")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
 
-print(f"Features computed at: {features_computed_at.isoformat()}")
+    try:
+        spark.sparkContext.setLogLevel("WARN")
 
-print(
-    f"Gold user feature count: {gold_user_features.count()}"
-)
+        silver_path = Path(project_path(SILVER_PATH))
+        if not silver_path.exists():
+            raise FileNotFoundError(
+                f"Silver path does not exist. Run spark-batch/bronze_to_silver.py first: {silver_path}"
+            )
 
-gold_user_features.show(truncate=False)
+        spark.read.parquet(str(silver_path)).createOrReplaceTempView("silver_user_events")
 
-gold_user_features.printSchema()
+        # One timestamp for the whole run; recency_hours is measured against it.
+        features_computed_at = datetime.now(timezone.utc)
+
+        gold_user_features = spark.sql(
+            GOLD_FEATURES_SQL, args={"features_computed_at": features_computed_at}
+        )
+
+        gold_user_features.write.mode("overwrite").parquet(project_path(GOLD_PATH))
+
+        print("Gold user_features written successfully")
+        print(f"Features computed at: {features_computed_at.isoformat()}")
+        print(f"Gold user feature count: {gold_user_features.count()}")
+
+        gold_user_features.show(truncate=False)
+        gold_user_features.printSchema()
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()

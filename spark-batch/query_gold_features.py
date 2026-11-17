@@ -1,104 +1,119 @@
+import os
+from pathlib import Path
+
 from pyspark.sql import SparkSession
 
-spark = (
-    SparkSession.builder
-    .appName("QueryGoldUserFeatures")
-    .config("spark.sql.session.timeZone", "UTC")
-    .getOrCreate()
-)
+# data/ and logs/ resolve from PROJECT1_ROOT (default: the repository root), like
+# spark-streaming/read_stream.py, so the script works from any directory.
+PROJECT_ROOT = os.environ.get("PROJECT1_ROOT", str(Path(__file__).resolve().parents[1]))
 
-spark.sparkContext.setLogLevel("WARN")
 
-gold_df = spark.read.parquet(
-    "data/gold/user_features"
-)
+def project_path(relative_path):
+    return os.path.join(PROJECT_ROOT, relative_path)
 
-gold_df.createOrReplaceTempView(
-    "gold_user_features"
-)
 
-print("Top users by total events:")
+def main():
+    spark = (
+        SparkSession.builder.appName("QueryGoldUserFeatures")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
 
-spark.sql("""
+    try:
+        spark.sparkContext.setLogLevel("WARN")
 
-    SELECT
+        gold_df = spark.read.parquet(project_path("data/gold/user_features"))
 
-        user_id,
-        user_name,
-        membership_tier,
+        gold_df.createOrReplaceTempView("gold_user_features")
 
-        total_events,
-        purchase_count,
-        add_to_cart_count,
-        unique_products_interacted,
-        last_event_timestamp
+        print("Top users by total events:")
 
-    FROM gold_user_features
+        spark.sql("""
 
-    ORDER BY total_events DESC
+            SELECT
 
-    LIMIT 20
+                user_id,
+                user_name,
+                membership_tier,
 
-""").show(truncate=False)
+                total_events,
+                purchase_count,
+                add_to_cart_count,
+                unique_products_interacted,
+                last_event_timestamp
 
-print("Users with strongest purchase intent:")
+            FROM gold_user_features
 
-spark.sql("""
+            ORDER BY total_events DESC
 
-    SELECT
+            LIMIT 20
 
-        user_id,
-        user_name,
-        membership_tier,
+        """).show(truncate=False)
 
-        total_events,
-        product_view_count,
-        add_to_cart_count,
-        purchase_count,
+        print("Users with strongest purchase intent:")
 
-        ROUND(
-            CAST(add_to_cart_count AS DOUBLE)
-            / total_events,
-            2
-        ) AS cart_ratio,
+        spark.sql("""
 
-        ROUND(
-            CAST(purchase_count AS DOUBLE)
-            / total_events,
-            2
-        ) AS purchase_ratio
+            SELECT
 
-    FROM gold_user_features
+                user_id,
+                user_name,
+                membership_tier,
 
-    WHERE total_events > 0
+                total_events,
+                product_view_count,
+                add_to_cart_count,
+                purchase_count,
 
-    ORDER BY
-        cart_ratio DESC,
-        purchase_ratio DESC
+                ROUND(
+                    CAST(add_to_cart_count AS DOUBLE)
+                    / total_events,
+                    2
+                ) AS cart_ratio,
 
-    LIMIT 20
+                ROUND(
+                    CAST(purchase_count AS DOUBLE)
+                    / total_events,
+                    2
+                ) AS purchase_ratio
 
-""").show(truncate=False)
+            FROM gold_user_features
 
-print("High-value users by average event price:")
+            WHERE total_events > 0
 
-spark.sql("""
+            ORDER BY
+                cart_ratio DESC,
+                purchase_ratio DESC
 
-    SELECT
+            LIMIT 20
 
-        user_id,
-        user_name,
-        membership_tier,
+        """).show(truncate=False)
 
-        total_events,
-        avg_event_price,
-        max_event_price,
-        unique_products_interacted
+        print("High-value users by average event price:")
 
-    FROM gold_user_features
+        spark.sql("""
 
-    ORDER BY avg_event_price DESC
+            SELECT
 
-    LIMIT 20
+                user_id,
+                user_name,
+                membership_tier,
 
-""").show(truncate=False)
+                total_events,
+                avg_event_price,
+                max_event_price,
+                unique_products_interacted
+
+            FROM gold_user_features
+
+            ORDER BY avg_event_price DESC
+
+            LIMIT 20
+
+        """).show(truncate=False)
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()

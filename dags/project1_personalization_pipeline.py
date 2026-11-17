@@ -8,7 +8,6 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG, literal
 
-
 PROJECT_ROOT = os.environ.get(
     "PROJECT1_ROOT",
     str(Path(__file__).resolve().parents[1]),
@@ -32,7 +31,6 @@ with DAG(
     default_args=DEFAULT_ARGS,
     tags=["project1", "spark", "lakehouse", "feature-store"],
 ) as dag:
-
     verify_bronze_exists = BashOperator(
         task_id="verify_bronze_exists",
         cwd=PROJECT_ROOT,
@@ -159,8 +157,9 @@ with DAG(
         ),
     )
 
-    verify_postgres_api_path = BashOperator(
-        task_id="verify_postgres_api_path",
+    # Checks the serving table only; it does not call the API.
+    verify_postgres_table = BashOperator(
+        task_id="verify_postgres_table",
         cwd=PROJECT_ROOT,
         bash_command=literal(
             """
@@ -208,5 +207,5 @@ PY
         >> silver_to_gold
         >> verify_gold_exists
         >> gold_to_postgres
-        >> verify_postgres_api_path
+        >> verify_postgres_table
     )
