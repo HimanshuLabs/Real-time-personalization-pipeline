@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 EXCLUDED_DIRS = {
@@ -24,11 +23,7 @@ def should_skip(path: Path) -> bool:
 
 
 def test_python_files_have_valid_syntax():
-    python_files = [
-        path
-        for path in ROOT.rglob("*.py")
-        if not should_skip(path.relative_to(ROOT))
-    ]
+    python_files = [path for path in ROOT.rglob("*.py") if not should_skip(path.relative_to(ROOT))]
 
     assert python_files, "No Python files found to validate."
 

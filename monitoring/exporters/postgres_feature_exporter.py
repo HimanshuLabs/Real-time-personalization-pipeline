@@ -1,10 +1,12 @@
 import os
 import time
-from prometheus_client import Gauge, start_http_server
-import psycopg
 
+import psycopg
+from prometheus_client import Gauge, start_http_server
 
 EXPORTER_PORT = int(os.getenv("EXPORTER_PORT", "8001"))
+# Loopback only by default; the container runs on the host network.
+EXPORTER_ADDR = os.getenv("EXPORTER_ADDR", "127.0.0.1")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
 
 DB_HOST = os.getenv("POSTGRES_HOST", "host.docker.internal")
@@ -34,6 +36,11 @@ feature_freshness_seconds = Gauge(
     "Age in seconds of the newest event timestamp available in PostgreSQL user_features table.",
 )
 
+features_computed_age_seconds = Gauge(
+    "project1_features_computed_age_seconds",
+    "Age in seconds of the newest features_computed_at in PostgreSQL user_features table (time since the last Gold run that was published).",
+)
+
 
 def mark_down() -> None:
     # NaN instead of the last good values, so a dead DB never looks fresh.
@@ -41,6 +48,7 @@ def mark_down() -> None:
     user_features_rows.set(float("nan"))
     latest_feature_event_timestamp_unix.set(float("nan"))
     feature_freshness_seconds.set(float("nan"))
+    features_computed_age_seconds.set(float("nan"))
 
 
 def collect_metrics() -> None:
@@ -58,20 +66,28 @@ def collect_metrics() -> None:
                     """
                     SELECT
                         COUNT(*)::bigint AS row_count,
-                        EXTRACT(EPOCH FROM MAX(last_event_timestamp))::double precision AS latest_event_epoch
+                        EXTRACT(EPOCH FROM MAX(last_event_timestamp))::double precision AS latest_event_epoch,
+                        EXTRACT(EPOCH FROM MAX(features_computed_at))::double precision AS latest_computed_epoch
                     FROM user_features;
                     """
                 )
-                row_count, latest_event_epoch = cur.fetchone()
+                row_count, latest_event_epoch, latest_computed_epoch = cur.fetchone()
 
+        now = time.time()
         user_features_rows.set(row_count or 0)
 
         if latest_event_epoch is not None:
             latest_feature_event_timestamp_unix.set(float(latest_event_epoch))
-            feature_freshness_seconds.set(max(time.time() - float(latest_event_epoch), 0))
+            feature_freshness_seconds.set(max(now - float(latest_event_epoch), 0))
         else:
             latest_feature_event_timestamp_unix.set(0)
             feature_freshness_seconds.set(-1)
+
+        # Same convention as freshness: -1 for an empty table.
+        if latest_computed_epoch is not None:
+            features_computed_age_seconds.set(max(now - float(latest_computed_epoch), 0))
+        else:
+            features_computed_age_seconds.set(-1)
 
         exporter_up.set(1)
 
@@ -81,8 +97,8 @@ def collect_metrics() -> None:
 
 
 def main() -> None:
-    start_http_server(EXPORTER_PORT)
-    print(f"[feature-exporter] Listening on :{EXPORTER_PORT}", flush=True)
+    start_http_server(EXPORTER_PORT, addr=EXPORTER_ADDR)
+    print(f"[feature-exporter] Listening on {EXPORTER_ADDR}:{EXPORTER_PORT}", flush=True)
 
     while True:
         collect_metrics()

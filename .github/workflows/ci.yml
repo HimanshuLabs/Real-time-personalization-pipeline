@@ -14,8 +14,33 @@ permissions:
 
 jobs:
   python-validation:
-    name: Python lint and validation
+    name: Python lint and validation (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    # Real PostgreSQL for tests/test_publish_swap.py; the tests create and drop
+    # their own database (p1_publish_test) on it.
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: p1_test
+          POSTGRES_PASSWORD: p1_test
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U p1_test -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      P1_TEST_DATABASE_URL: postgresql://p1_test:p1_test@localhost:5432/postgres
 
     steps:
       - name: Checkout repository
@@ -24,7 +49,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: "pip"
 
       - name: Set up Java (PySpark tests)
@@ -42,12 +67,23 @@ jobs:
         run: |
           ruff check .
 
-      - name: Run pytest validation
+      - name: Check Ruff formatting
         run: |
-          pytest -q
+          ruff format --check .
+
+      # Every test must run in CI: a skipped test fails the job. bash runs this
+      # step with -eo pipefail, so a pytest failure isn't hidden by tee.
+      - name: Run pytest validation (skips fail the job)
+        shell: bash
+        run: |
+          pytest -q -rs | tee pytest-output.txt
+          if tail -n 1 pytest-output.txt | grep -Eq '[0-9]+ skipped'; then
+            echo "::error::pytest skipped tests; every test must run in CI (see the SKIPPED lines above)"
+            exit 1
+          fi
 
   docker-build:
-    name: FastAPI Docker build validation
+    name: Docker image build validation (API and feature exporter)
     runs-on: ubuntu-latest
     needs: python-validation
 
@@ -58,3 +94,7 @@ jobs:
       - name: Build FastAPI Docker image
         run: |
           docker build -f api/Dockerfile -t project1-feature-api:ci .
+
+      - name: Build feature exporter Docker image
+        run: |
+          docker build -f monitoring/exporters/Dockerfile.feature_exporter -t project1-feature-freshness-exporter:ci .

@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "[monitoring] Stopping monitoring containers..."
 
-for name in kafka-exporter prometheus grafana feature-freshness-exporter; do
+for name in project1_kafka_exporter project1_prometheus project1_grafana project1_feature_exporter; do
   id="$(docker ps -aq --filter "name=^/${name}$")"
   if [ -n "$id" ]; then
     echo "[monitoring] Removing ${name} -> ${id}"

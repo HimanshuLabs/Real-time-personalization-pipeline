@@ -1,2 +1,2 @@
-prometheus-client
-psycopg[binary]
+prometheus-client==0.25.0
+psycopg[binary]==3.3.4

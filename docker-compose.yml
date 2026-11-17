@@ -1,7 +1,7 @@
 services:
   kafka:
     image: apache/kafka:4.1.2
-    container_name: kafka
+    container_name: project1_kafka
     ports:
       - "127.0.0.1:9092:9092"
     environment:
@@ -21,14 +21,17 @@ services:
       KAFKA_NUM_PARTITIONS: 3
       # Default is /tmp/kafka-logs inside the container; keep it on the volume.
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Keep every event (the default deletes after 7 days), so re-reading the
+      # topic from the start after a stream reset always rebuilds all of Bronze.
+      KAFKA_LOG_RETENTION_MS: "-1"
     volumes:
       - kafka_data:/var/lib/kafka/data
 
 
 
   postgres:
-    image: postgres:16
-    container_name: postgres
+    image: postgres:16.14
+    container_name: project1_postgres
     ports:
       - "127.0.0.1:5433:5432"
     environment:

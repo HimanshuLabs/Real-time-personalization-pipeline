@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -45,15 +44,20 @@ def test_runtime_folders_are_gitignored():
 
     # --no-index: judge by the ignore rules alone, even for paths that exist.
     result = subprocess.run(
-        ["git", "check-ignore", "--no-index", "--verbose", "--non-matching", *IGNORED_RUNTIME_PATHS],
+        [
+            "git",
+            "check-ignore",
+            "--no-index",
+            "--verbose",
+            "--non-matching",
+            *IGNORED_RUNTIME_PATHS,
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
     not_ignored = [
-        line.split("\t")[-1]
-        for line in result.stdout.splitlines()
-        if line.startswith("::")
+        line.split("\t")[-1] for line in result.stdout.splitlines() if line.startswith("::")
     ]
     assert not not_ignored, f"Runtime paths not ignored by git: {not_ignored}"
 
@@ -88,3 +92,14 @@ def test_commerce_event_types_match_and_are_known():
 
     gold_commerce = module_list_constant("spark-batch/silver_to_gold.py", "COMMERCE_EVENT_TYPES")
     assert gold_commerce == producer_commerce
+
+
+def test_cart_event_types_match_and_are_commerce_events():
+    producer_cart = module_list_constant("data-generator/producer.py", "CART_EVENT_TYPES")
+    stream_cart = module_list_constant("spark-streaming/read_stream.py", "CART_EVENT_TYPES")
+    assert stream_cart == producer_cart
+    assert len(set(producer_cart)) == len(producer_cart)
+
+    commerce = module_list_constant("data-generator/producer.py", "COMMERCE_EVENT_TYPES")
+    not_commerce = set(producer_cart) - set(commerce)
+    assert not not_commerce, f"CART_EVENT_TYPES not in COMMERCE_EVENT_TYPES: {sorted(not_commerce)}"
