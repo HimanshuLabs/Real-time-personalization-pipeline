@@ -1,7 +1,9 @@
 import copy
+import csv
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import timedelta
@@ -22,6 +24,12 @@ SCRIPTS = [
     "spark-batch/query_gold_features.py",
 ]
 
+# P2's shop_master export, which the producer (and so the reference script) loads.
+SHOP_MASTER = Path("reference-data") / "shop_master"
+
+# Three real customers: customer IDs are not contiguous (1-3 don't exist).
+USER_1, USER_2, USER_3 = 4, 5, 6
+
 # Non-commerce events carry no product or price.
 NO_PRODUCT = {field: None for field in PRODUCT_AND_PRICE_FIELDS}
 
@@ -34,9 +42,10 @@ def event(event_id, user_id, event_type, event_time, session_id, **overrides):
         event_type=event_type,
         event_time=event_time,
         session_id=session_id,
-        product_id=10000,
-        product_name="air_fryer",
-        category="home",
+        # An active product from products.csv.
+        product_id=9,
+        product_name="Casavio Wall Clock",
+        category="Home",
         quantity=1,
         discounted_price=900.0,
         cart_value=None,
@@ -46,14 +55,14 @@ def event(event_id, user_id, event_type, event_time, session_id, **overrides):
     return row
 
 
-# User 1's name and tier change between events; Gold must still give one row
-# with the latest values. User 2's two prices average exactly 1126.035:
+# USER_1's name and tier change between events; Gold must still give one row
+# with the latest values. USER_2's two prices average exactly 1126.035:
 # DECIMAL rounds that to 1126.04, while AVG on DOUBLE gives 1126.03.
-# User 3 has no commerce event.
+# USER_3 has no commerce event.
 BRONZE_EVENTS = [
     event(
         "u1-view-1",
-        1,
+        USER_1,
         "home_page_view",
         "2026-10-25T10:00:00+00:00",
         "s-1a",
@@ -63,7 +72,7 @@ BRONZE_EVENTS = [
     ),
     event(
         "u1-view-2",
-        1,
+        USER_1,
         "home_page_view",
         "2026-10-25T10:05:00+00:00",
         "s-1b",
@@ -73,7 +82,7 @@ BRONZE_EVENTS = [
     ),
     event(
         "u1-view-2",
-        1,
+        USER_1,
         "home_page_view",
         "2026-10-25T10:05:00+00:00",
         "s-1b",
@@ -83,7 +92,7 @@ BRONZE_EVENTS = [
     ),
     event(
         "u1-buy-1",
-        1,
+        USER_1,
         "payment_success",
         "2026-10-25T10:10:00+00:00",
         "s-1b",
@@ -94,7 +103,7 @@ BRONZE_EVENTS = [
     ),
     event(
         "u2-view-1",
-        2,
+        USER_2,
         "product_view",
         "2026-10-25T11:00:00+00:00",
         "s-2",
@@ -103,17 +112,17 @@ BRONZE_EVENTS = [
     ),
     event(
         "u2-view-ghost",
-        2,
+        USER_2,
         "product_view",
         "2026-10-25T11:01:00+00:00",
         "s-2",
         product_id=99999,
         product_name="ghost_product",
-        category="home",
+        category="Home",
         original_price=1200.0,
         discounted_price=1166.58,
     ),
-    event("u3-login", 3, "login", "2026-10-25T12:00:00+00:00", "s-3", **NO_PRODUCT),
+    event("u3-login", USER_3, "login", "2026-10-25T12:00:00+00:00", "s-3", **NO_PRODUCT),
 ]
 
 # Gold's columns and types, in order.
@@ -172,12 +181,15 @@ def pipeline(tmp_path_factory):
     filtered_out = (
         valid_df.limit(1)
         .withColumn("event_id", lit("u9-null-event-type"))
-        .withColumn("user_id", lit(9))
+        .withColumn("user_id", lit(7))
         .withColumn("event_type", lit(None).cast("string"))
     )
     valid_df.union(filtered_out).write.mode("overwrite").parquet(
         str(root / "data" / "bronze" / "user_events")
     )
+
+    # The shop CSVs, where the producer looks for them under PROJECT1_ROOT.
+    shutil.copytree(ROOT / SHOP_MASTER, root / SHOP_MASTER)
 
     # Run from another directory: every path must come from PROJECT1_ROOT.
     elsewhere = tmp_path_factory.mktemp("elsewhere")
@@ -204,6 +216,8 @@ def pipeline(tmp_path_factory):
         "gold_schema": [(field.name, field.dataType.simpleString()) for field in gold.schema],
         "account_status": {row.user_id: row.account_status for row in users_dim.collect()},
         "is_active": {row.product_id: row.is_active for row in products_dim.collect()},
+        "signup_date": {row.user_id: row.signup_date for row in users_dim.collect()},
+        "products_dim": {row.product_id: row.asDict() for row in products_dim.collect()},
         "silver_report": json.loads((root / "logs" / "silver_enrichment_report.json").read_text()),
         "reference_report": json.loads((root / "logs" / "reference_data_report.json").read_text()),
         "reference_csv_dir_exists": (root / "data" / "reference").exists(),
@@ -214,7 +228,7 @@ def pipeline(tmp_path_factory):
 
 def _clean_env():
     env = dict(os.environ)
-    # Use the default NUM_USERS so users 1 and 2 are in the users dim.
+    # No NUM_USERS cap: the users dim always holds every customer anyway.
     env.pop("NUM_USERS", None)
     return env
 
@@ -247,7 +261,7 @@ def test_silver_product_reference_missing_only_for_unknown_products(pipeline):
 
 def test_gold_one_row_per_user(pipeline):
     assert pipeline["gold_rows"] == 3
-    assert sorted(pipeline["gold"]) == [1, 2, 3]
+    assert sorted(pipeline["gold"]) == [USER_1, USER_2, USER_3]
 
 
 def test_gold_schema_columns_and_types_in_order(pipeline):
@@ -255,7 +269,7 @@ def test_gold_schema_columns_and_types_in_order(pipeline):
 
 
 def test_gold_price_features_use_commerce_events_only(pipeline):
-    user_1, user_2, user_3 = (pipeline["gold"][user_id] for user_id in (1, 2, 3))
+    user_1, user_2, user_3 = (pipeline["gold"][user_id] for user_id in (USER_1, USER_2, USER_3))
 
     # User 1: only payment_success has a price; the page views have none.
     assert user_1["avg_event_price"] == 900.0
@@ -271,8 +285,9 @@ def test_gold_price_features_use_commerce_events_only(pipeline):
 def test_gold_spend_sessions_and_recency(pipeline):
     gold = pipeline["gold"]
 
-    assert [gold[u]["total_spend"] for u in (1, 2, 3)] == [1800.0, 0.0, 0.0]
-    assert [gold[u]["session_count"] for u in (1, 2, 3)] == [2, 1, 1]
+    users = (USER_1, USER_2, USER_3)
+    assert [gold[u]["total_spend"] for u in users] == [1800.0, 0.0, 0.0]
+    assert [gold[u]["session_count"] for u in users] == [2, 1, 1]
 
     computed_at = {row["features_computed_at"] for row in gold.values()}
     assert len(computed_at) == 1
@@ -289,7 +304,7 @@ def test_gold_spend_sessions_and_recency(pipeline):
 
 
 def test_gold_counts_and_latest_profile_for_user_1(pipeline):
-    user_1 = pipeline["gold"][1]
+    user_1 = pipeline["gold"][USER_1]
     assert user_1["page_view_count"] == 2
     assert user_1["purchase_count"] == 1
     assert user_1["total_events"] == 3
@@ -315,7 +330,8 @@ def test_dim_status_matches_producer_rules(pipeline):
     account_status = pipeline["account_status"]
     is_active = pipeline["is_active"]
 
-    assert len(account_status) == producer.NUM_USERS
+    # Every customer in customers.csv, with the producer's status.
+    assert sorted(account_status) == sorted(producer.USER_IDS)
     assert all(
         status == producer.account_status(user_id) for user_id, status in account_status.items()
     )
@@ -324,10 +340,30 @@ def test_dim_status_matches_producer_rules(pipeline):
     assert all(active == producer.is_product_active(pid) for pid, active in is_active.items())
 
 
+def test_dims_come_from_the_shop_csvs(pipeline):
+    with open(ROOT / SHOP_MASTER / "customers.csv", newline="", encoding="utf-8") as file:
+        customers = {int(row["customer_id"]): row for row in csv.DictReader(file)}
+    with open(ROOT / SHOP_MASTER / "products.csv", newline="", encoding="utf-8") as file:
+        products = {int(row["product_id"]): row for row in csv.DictReader(file)}
+
+    signup = pipeline["signup_date"]
+    assert sorted(signup) == sorted(customers)
+    assert all(signup[u].isoformat() == row["signup_date"] for u, row in customers.items())
+
+    dim = pipeline["products_dim"]
+    assert sorted(dim) == sorted(products)
+    for product_id, row in products.items():
+        assert dim[product_id]["product"] == row["product_name"]
+        assert dim[product_id]["product_category"] == row["category"]
+        assert dim[product_id]["product_brand"] == row["brand"]
+        assert dim[product_id]["reference_price"] == float(row["original_price"])
+        assert dim[product_id]["is_active"] == (row["product_status"] == "active")
+
+
 def test_scripts_resolve_paths_from_project1_root(pipeline):
     # The scripts ran from an empty directory and wrote only under PROJECT1_ROOT.
     assert pipeline["elsewhere_contents"] == []
-    assert pipeline["reference_report"]["user_reference_count"] == 5000
+    assert pipeline["reference_report"]["user_reference_count"] == 497
 
 
 def test_silver_report_counts(pipeline):
@@ -354,8 +390,8 @@ BATCH_SCRIPTS = [*SCRIPTS, "spark-batch/publish_gold_to_postgres.py"]
 def test_reference_data_writes_parquet_dims_only(pipeline):
     assert not pipeline["reference_csv_dir_exists"]
     assert pipeline["reference_report"] == {
-        "user_reference_count": 5000,
-        "product_reference_count": 29,
+        "user_reference_count": 497,
+        "product_reference_count": 147,
         "users_dimension_path": "data/dim/users",
         "products_dimension_path": "data/dim/products",
     }

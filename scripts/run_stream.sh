@@ -15,6 +15,11 @@ export STREAM_STOP_FILE="${STOP_DIR}/stop"
 trap 'rm -rf "${STOP_DIR}"' EXIT
 trap ': > "${STREAM_STOP_FILE}"' INT TERM
 
+# Spark 4.1.x crashes when it restarts on a planned-but-uncommitted batch
+# (https://github.com/apache/spark/issues/55236); repair the checkpoints first.
+# A failure aborts the start (set -e).
+"${PYTHON:-python3}" scripts/repair_stream_checkpoints.py
+
 # Ignored signals stay ignored across exec, and the JVM leaves already-ignored
 # shutdown signals alone, so the JVM is never killed mid-batch. read_stream.py
 # installs its own handlers, so a signal that reaches it directly still stops

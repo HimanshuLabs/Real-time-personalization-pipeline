@@ -1,0 +1,148 @@
+product_id,product_name,category,brand,product_status,original_price
+4,Auraeva Beard Oil,Beauty,Auraeva,active,369.00
+5,Pulsivo Resistance Bands,Fitness,Pulsivo,discontinued,339.00
+6,Leafora Publishing World History Primer,Books,Leafora Publishing,active,789.00
+7,Quenzo Bluetooth Speaker,Electronics,Quenzo,discontinued,6179.00
+8,Vastrio Formal Shirt,Fashion,Vastrio,active,939.00
+9,Casavio Wall Clock,Home,Casavio,active,1119.00
+10,Glimra Face Serum,Beauty,Glimra,active,369.00
+11,Corvanta Yoga Mat,Fitness,Corvanta,active,669.00
+12,Pagemont Books Short Stories Anthology,Books,Pagemont Books,active,199.00
+13,Voltaro Wireless Mouse,Electronics,Voltaro,active,1819.00
+14,Threadora Sneakers,Fashion,Threadora,active,3759.00
+15,Casavio Nonstick Cookware Set,Home,Casavio,active,5749.00
+16,Auraeva Sunscreen SPF 50,Beauty,Auraeva,active,329.00
+17,Pulsivo Protein Shaker,Fitness,Pulsivo,active,589.00
+18,Pagemont Books Indian Vegetarian Cookbook,Books,Pagemont Books,active,439.00
+19,Pixavi Webcam,Electronics,Pixavi,active,2929.00
+20,Vastrio Sneakers,Fashion,Vastrio,active,2249.00
+21,Nidora Air Purifier,Home,Nidora,active,13289.00
+22,Velvora Hair Oil,Beauty,Velvora,active,169.00
+23,Pulsivo Kettlebell,Fitness,Pulsivo,active,1219.00
+24,Leafora Publishing Personal Finance Handbook,Books,Leafora Publishing,active,339.00
+25,Voltaro Laptop Stand,Electronics,Voltaro,active,1569.00
+26,Vastrio Leather Wallet,Fashion,Vastrio,active,1249.00
+27,Casavio Cotton Bedsheet Set,Home,Casavio,discontinued,769.00
+28,Auraeva Shampoo,Beauty,Auraeva,active,429.00
+29,Pulsivo Skipping Rope,Fitness,Pulsivo,active,549.00
+30,Leafora Publishing Atlas of India,Books,Leafora Publishing,active,409.00
+31,Pixavi Power Bank,Electronics,Pixavi,active,879.00
+32,Kairovi Sunglasses,Fashion,Kairovi,active,1739.00
+33,Nidora Curtain Set,Home,Nidora,active,939.00
+34,Glimra Sheet Mask Pack,Beauty,Glimra,active,329.00
+35,Pulsivo Cycling Gloves,Fitness,Pulsivo,discontinued,559.00
+36,Pagemont Books Daily Planner Diary,Books,Pagemont Books,active,499.00
+37,Voltaro Smart Watch,Electronics,Voltaro,active,4639.00
+38,Vastrio Running Shoes,Fashion,Vastrio,active,5339.00
+39,Nidora Memory Foam Pillow,Home,Nidora,active,1039.00
+40,Auraeva Eau de Parfum,Beauty,Auraeva,active,839.00
+41,Stridiq Foam Roller,Fitness,Stridiq,active,629.00
+42,Leafora Publishing Pocket English Dictionary,Books,Leafora Publishing,active,419.00
+43,Voltaro Mechanical Keyboard,Electronics,Voltaro,active,3709.00
+44,Kairovi Analog Watch,Fashion,Kairovi,active,1499.00
+45,Hearthiq Curtain Set,Home,Hearthiq,active,1499.00
+46,Velvora Beard Oil,Beauty,Velvora,active,259.00
+47,Pulsivo Fitness Tracker,Fitness,Pulsivo,active,3289.00
+48,Pagemont Books Yoga for Beginners,Books,Pagemont Books,active,589.00
+49,Voltaro Gaming Headset,Electronics,Voltaro,active,2699.00
+50,Vastrio Canvas Tote Bag,Fashion,Vastrio,active,469.00
+51,Hearthiq Study Table,Home,Hearthiq,active,5089.00
+52,Glimra Face Wash,Beauty,Glimra,active,429.00
+53,Stridiq Gym Bag,Fitness,Stridiq,active,1529.00
+54,Pagemont Books Atlas of India,Books,Pagemont Books,active,739.00
+55,Quenzo Webcam,Electronics,Quenzo,active,1459.00
+56,Threadora Running Shoes,Fashion,Threadora,active,2939.00
+57,Nidora Office Chair,Home,Nidora,active,12679.00
+58,Velvora Body Lotion,Beauty,Velvora,active,699.00
+59,Corvanta Kettlebell,Fitness,Corvanta,active,3219.00
+60,Inkvale Press Personal Finance Handbook,Books,Inkvale Press,active,419.00
+61,Pixavi USB-C Hub,Electronics,Pixavi,active,1659.00
+62,Threadora Silk Scarf,Fashion,Threadora,active,1009.00
+63,Hearthiq Wall Clock,Home,Hearthiq,active,439.00
+64,Velvora Face Wash,Beauty,Velvora,active,269.00
+65,Stridiq Cycling Gloves,Fitness,Stridiq,active,909.00
+66,Leafora Publishing Sudoku Puzzle Collection,Books,Leafora Publishing,active,259.00
+67,Pixavi Portable SSD,Electronics,Pixavi,active,5059.00
+68,Kairovi Formal Shirt,Fashion,Kairovi,active,1079.00
+69,Nidora Nonstick Cookware Set,Home,Nidora,active,1759.00
+70,Velvora Face Serum,Beauty,Velvora,active,549.00
+71,Pulsivo Foam Roller,Fitness,Pulsivo,active,1619.00
+72,Leafora Publishing Short Stories Anthology,Books,Leafora Publishing,active,479.00
+73,Voltaro USB-C Hub,Electronics,Voltaro,active,1699.00
+74,Kairovi Canvas Tote Bag,Fashion,Kairovi,active,609.00
+75,Nidora Steel Water Bottle,Home,Nidora,discontinued,309.00
+76,Glimra Night Cream,Beauty,Glimra,discontinued,889.00
+77,Pulsivo Exercise Ball,Fitness,Pulsivo,active,529.00
+78,Inkvale Press Pocket English Dictionary,Books,Inkvale Press,active,259.00
+79,Pixavi Gaming Headset,Electronics,Pixavi,active,2229.00
+80,Threadora Formal Shirt,Fashion,Threadora,active,949.00
+81,Casavio Table Lamp,Home,Casavio,active,1069.00
+82,Glimra Sunscreen SPF 50,Beauty,Glimra,active,479.00
+83,Stridiq Kettlebell,Fitness,Stridiq,active,3449.00
+84,Inkvale Press Mathematics Practice Workbook,Books,Inkvale Press,active,339.00
+85,Quenzo Portable SSD,Electronics,Quenzo,active,9799.00
+86,Kairovi Cotton Kurta,Fashion,Kairovi,active,649.00
+87,Hearthiq Steel Water Bottle,Home,Hearthiq,active,409.00
+88,Glimra Kajal,Beauty,Glimra,active,409.00
+89,Corvanta Gym Bag,Fitness,Corvanta,active,1959.00
+90,Inkvale Press Children's Picture Encyclopedia,Books,Inkvale Press,active,629.00
+91,Voltaro Bluetooth Speaker,Electronics,Voltaro,active,2169.00
+92,Vastrio Cotton Kurta,Fashion,Vastrio,active,1549.00
+93,Casavio Office Chair,Home,Casavio,active,6869.00
+94,Auraeva Kajal,Beauty,Auraeva,active,399.00
+95,Stridiq Protein Shaker,Fitness,Stridiq,active,439.00
+96,Inkvale Press Indian Vegetarian Cookbook,Books,Inkvale Press,discontinued,399.00
+97,Pixavi Bluetooth Speaker,Electronics,Pixavi,active,1179.00
+98,Kairovi Running Shoes,Fashion,Kairovi,active,3129.00
+99,Hearthiq Cotton Bedsheet Set,Home,Hearthiq,active,2619.00
+100,Velvora Shampoo,Beauty,Velvora,active,399.00
+101,Corvanta Protein Shaker,Fitness,Corvanta,active,689.00
+102,Pagemont Books Beginner's Guide to Python,Books,Pagemont Books,active,499.00
+103,Quenzo USB-C Hub,Electronics,Quenzo,active,1209.00
+104,Kairovi Leather Wallet,Fashion,Kairovi,active,1189.00
+105,Casavio Study Table,Home,Casavio,active,5059.00
+106,Velvora Sunscreen SPF 50,Beauty,Velvora,active,549.00
+107,Corvanta Exercise Ball,Fitness,Corvanta,discontinued,1209.00
+108,Leafora Publishing Children's Picture Encyclopedia,Books,Leafora Publishing,active,549.00
+109,Quenzo Wireless Mouse,Electronics,Quenzo,active,659.00
+110,Kairovi Denim Jacket,Fashion,Kairovi,active,1709.00
+111,Nidora Storage Organizer,Home,Nidora,discontinued,499.00
+112,Velvora Eau de Parfum,Beauty,Velvora,active,2049.00
+113,Stridiq Skipping Rope,Fitness,Stridiq,active,229.00
+114,Inkvale Press Yoga for Beginners,Books,Inkvale Press,active,429.00
+115,Quenzo Smart Watch,Electronics,Quenzo,active,5849.00
+116,Threadora Denim Jacket,Fashion,Threadora,active,2559.00
+117,Hearthiq Table Lamp,Home,Hearthiq,active,1989.00
+118,Velvora Sheet Mask Pack,Beauty,Velvora,active,489.00
+119,Pulsivo Push-Up Bars,Fitness,Pulsivo,active,619.00
+120,Inkvale Press World History Primer,Books,Inkvale Press,active,329.00
+121,Quenzo Gaming Headset,Electronics,Quenzo,active,6469.00
+122,Vastrio Rain Jacket,Fashion,Vastrio,active,1179.00
+123,Hearthiq Dinner Set,Home,Hearthiq,active,5889.00
+124,Glimra Beard Oil,Beauty,Glimra,active,449.00
+125,Corvanta Skipping Rope,Fitness,Corvanta,active,749.00
+126,Inkvale Press Atlas of India,Books,Inkvale Press,active,409.00
+127,Pixavi Mechanical Keyboard,Electronics,Pixavi,active,3159.00
+128,Vastrio Backpack,Fashion,Vastrio,active,809.00
+129,Hearthiq Storage Organizer,Home,Hearthiq,active,309.00
+130,Auraeva Lip Balm,Beauty,Auraeva,active,269.00
+131,Stridiq Fitness Tracker,Fitness,Stridiq,active,1649.00
+132,Inkvale Press Beginner's Guide to Python,Books,Inkvale Press,active,899.00
+133,Pixavi Wireless Earbuds,Electronics,Pixavi,active,3009.00
+134,Threadora Cotton Kurta,Fashion,Threadora,active,959.00
+135,Casavio Dinner Set,Home,Casavio,active,5649.00
+136,Glimra Lip Balm,Beauty,Glimra,active,169.00
+137,Stridiq Push-Up Bars,Fitness,Stridiq,active,419.00
+138,Pagemont Books World History Primer,Books,Pagemont Books,active,339.00
+139,Voltaro Portable SSD,Electronics,Voltaro,active,10679.00
+140,Threadora Analog Watch,Fashion,Threadora,active,1099.00
+141,Casavio Memory Foam Pillow,Home,Casavio,active,619.00
+142,Glimra Eau de Parfum,Beauty,Glimra,active,2679.00
+143,Stridiq Exercise Ball,Fitness,Stridiq,active,959.00
+144,Pagemont Books Mathematics Practice Workbook,Books,Pagemont Books,active,239.00
+145,Pixavi Laptop Stand,Electronics,Pixavi,active,789.00
+146,Kairovi Silk Scarf,Fashion,Kairovi,active,669.00
+147,Hearthiq Air Purifier,Home,Hearthiq,active,6419.00
+148,Glimra Hair Oil,Beauty,Glimra,active,189.00
+149,Corvanta Cycling Gloves,Fitness,Corvanta,active,559.00
+150,Pagemont Books Pocket English Dictionary,Books,Pagemont Books,active,349.00

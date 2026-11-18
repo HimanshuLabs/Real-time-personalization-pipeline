@@ -1,8 +1,6 @@
 import json
 import os
-import random
 import sys
-from datetime import date, timedelta
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -16,15 +14,18 @@ from pyspark.sql.types import (
     StructType,
 )
 
-# The dims are built from the producer's own catalog and user profiles, so every
+# The dims are built from the data the producer loads from P2's shop_master
+# export (reference-data/shop_master/customers.csv and products.csv), so every
 # id the producer can emit has a reference row. Importing producer.py does not
-# connect to Kafka: its Producer is only created inside main().
+# connect to Kafka: its Producer is only created inside main(). It does load
+# the CSVs, and exits 2 with a clear message if one is missing or incomplete.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data-generator"))
 from producer import (  # noqa: E402
-    NUM_USERS,
+    PRODUCT_BRAND_BY_NAME,
     PRODUCT_IDS,
     PRODUCT_REFERENCE_PRICES,
     PRODUCTS,
+    USER_IDS,
     get_user_profile,
     is_product_active,
     user_reference_attributes,
@@ -43,11 +44,6 @@ USERS_DIM_PATH = "data/dim/users"
 PRODUCTS_DIM_PATH = "data/dim/products"
 
 REPORT_PATH = "logs/reference_data_report.json"
-
-# Fixed anchor so signup_date doesn't change from one run to the next.
-SIGNUP_ANCHOR_DATE = date(2026, 1, 1)
-
-PRODUCT_BRANDS = ["NovaTech", "UrbanCart", "FitCore", "HomeNest", "PrimeStyle"]
 
 USERS_SCHEMA = StructType(
     [
@@ -75,7 +71,7 @@ PRODUCTS_SCHEMA = StructType(
 def build_user_row(user_id):
     profile = get_user_profile(user_id)
 
-    # Device, signup offset and account status come from the producer, so the
+    # Device, signup date and account status come from the producer, so the
     # producer can skip inactive accounts.
     attributes = user_reference_attributes(user_id)
 
@@ -84,20 +80,19 @@ def build_user_row(user_id):
         profile["user_segment"],
         profile["home_city"],
         attributes["device_preference"],
-        SIGNUP_ANCHOR_DATE - timedelta(days=attributes["signup_days_ago"]),
+        attributes["signup_date"],
         attributes["account_status"],
     )
 
 
 def build_product_row(category, product_name):
     product_id = PRODUCT_IDS[product_name]
-    rng = random.Random(f"products-dim:{product_id}")
 
     return (
         product_id,
         product_name,
         category,
-        rng.choice(PRODUCT_BRANDS),
+        PRODUCT_BRAND_BY_NAME[product_name],
         PRODUCT_REFERENCE_PRICES[product_name],
         is_product_active(product_id),
     )
@@ -113,8 +108,9 @@ def main():
     try:
         spark.sparkContext.setLogLevel("WARN")
 
+        # Every customer in customers.csv, whatever NUM_USERS caps the producer to.
         users_dim = spark.createDataFrame(
-            [build_user_row(user_id) for user_id in range(1, NUM_USERS + 1)], USERS_SCHEMA
+            [build_user_row(user_id) for user_id in USER_IDS], USERS_SCHEMA
         )
 
         products_dim = spark.createDataFrame(
