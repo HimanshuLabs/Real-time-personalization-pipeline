@@ -545,7 +545,16 @@ def launcher_env(tmp_path, **extra):
     stop_root = tmp_path / "tmp"
     stop_root.mkdir(exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k != "STREAM_STOP_FILE"}
-    env.update(PATH=f"{bin_dir}:{env['PATH']}", TMPDIR=str(stop_root), **extra)
+    # The launcher repairs the checkpoints under PROJECT1_ROOT before spark-submit:
+    # never let a test touch the repository's real checkpoints.
+    project_root = tmp_path / "project"
+    project_root.mkdir(exist_ok=True)
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        TMPDIR=str(stop_root),
+        PROJECT1_ROOT=str(project_root),
+        **extra,
+    )
     return env, stop_root
 
 
