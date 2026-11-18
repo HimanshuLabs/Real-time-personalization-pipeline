@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import os
@@ -5,19 +6,24 @@ import random
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+import uuid
+from datetime import date, datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 
 from confluent_kafka import Producer
-from faker import Faker
 
-fake = Faker()
+# reference-data/ resolves from PROJECT1_ROOT (default: the repository root),
+# like the batch jobs, so the producer works from any directory.
+PROJECT_ROOT = os.environ.get("PROJECT1_ROOT", str(Path(__file__).resolve().parents[1]))
 
-# Separate instance for profiles; reseeding it never touches `fake`,
-# so event_id/session_id UUIDs stay unique.
-profile_fake = Faker()
+# Read-only export of P2's warehouse: the current SCD2 rows of
+# warehouse.dim_customer and warehouse.dim_product.
+SHOP_MASTER_DIR = "reference-data/shop_master"
 
-NUM_USERS = int(os.environ.get("NUM_USERS", "5000"))
+# Optional cap: only the first NUM_USERS customers of customers.csv shop.
+# Unset or empty means every customer.
+NUM_USERS = int(os.environ["NUM_USERS"]) if os.environ.get("NUM_USERS") else None
 
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
@@ -78,81 +84,252 @@ COMMERCE_EVENT_TYPES = [
     "search_result_click",
 ]
 
-PRODUCT_CATEGORIES = [
-    "electronics",
-    "fashion",
-    "beauty",
-    "home",
-    "sports",
-    "books",
-    "grocery",
-    "toys",
+# A search uses a query that fits the session's category. One list per P2
+# category; a category in products.csv without a list is a load error.
+CATEGORY_SEARCH_QUERIES = {
+    "Electronics": [
+        "wireless earbuds",
+        "bluetooth speaker",
+        "gaming headset",
+        "mechanical keyboard",
+        "portable ssd 1tb",
+        "power bank 20000mah",
+        "usb c hub",
+        "webcam for laptop",
+        "smart watch",
+        "wireless mouse",
+        "laptop stand",
+    ],
+    "Fashion": [
+        "running shoes",
+        "white sneakers",
+        "cotton kurta",
+        "denim jacket",
+        "formal shirt",
+        "leather wallet",
+        "analog watch",
+        "sunglasses",
+        "backpack",
+        "canvas tote bag",
+        "rain jacket",
+        "silk scarf",
+    ],
+    "Home": [
+        "air purifier",
+        "cotton bedsheet",
+        "dinner set",
+        "memory foam pillow",
+        "nonstick cookware set",
+        "office chair",
+        "study table",
+        "table lamp",
+        "wall clock",
+        "curtains",
+        "steel water bottle",
+        "storage organizer",
+    ],
+    "Beauty": [
+        "face wash",
+        "face serum",
+        "sunscreen spf 50",
+        "lip balm",
+        "kajal",
+        "hair oil",
+        "shampoo",
+        "night cream",
+        "sheet mask",
+        "beard oil",
+        "perfume",
+        "body lotion",
+    ],
+    "Fitness": [
+        "yoga mat",
+        "kettlebell",
+        "resistance bands",
+        "skipping rope",
+        "foam roller",
+        "fitness tracker",
+        "protein shaker",
+        "gym bag",
+        "push up bars",
+        "exercise ball",
+        "cycling gloves",
+    ],
+    "Books": [
+        "python book",
+        "personal finance book",
+        "vegetarian cookbook",
+        "english dictionary",
+        "atlas of india",
+        "world history book",
+        "short stories",
+        "sudoku book",
+        "daily planner",
+        "yoga book",
+        "maths workbook",
+        "children's encyclopedia",
+    ],
+}
+
+CUSTOMER_COLUMNS = [
+    "customer_id",
+    "customer_name",
+    "email",
+    "gender",
+    "age",
+    "membership_tier",
+    "loyalty_points",
+    "preferred_language",
+    "customer_segment",
+    "is_prime_user",
+    "home_city",
+    "home_state",
+    "country",
+    "signup_date",
 ]
 
-PRODUCTS = {
-    "electronics": ["iphone_15", "macbook_air", "sony_headphones", "gaming_mouse", "monitor_4k"],
-    "fashion": ["nike_shoes", "hoodie", "cargo_pants", "oversized_tshirt", "jacket"],
-    "beauty": ["facewash", "moisturizer", "serum", "perfume"],
-    "home": ["air_fryer", "coffee_machine", "vacuum_cleaner"],
-    "sports": ["dumbbells", "yoga_mat", "cricket_bat"],
-    "books": ["atomic_habits", "sapiens", "python_crash_course"],
-    "grocery": ["basmati_rice", "olive_oil", "green_tea"],
-    "toys": ["lego_set", "rubiks_cube", "rc_car"],
-}
+PRODUCT_COLUMNS = [
+    "product_id",
+    "product_name",
+    "category",
+    "brand",
+    "product_status",
+    "original_price",
+]
 
-# Stable id per product: sorted names -> 10000 + index, built once.
-PRODUCT_IDS = {
-    name: 10000 + index
-    for index, name in enumerate(sorted(name for names in PRODUCTS.values() for name in names))
-}
+PRODUCT_STATUSES = {"active", "discontinued"}
 
-# Realistic list-price range (low, high) per category.
-CATEGORY_PRICE_BANDS = {
-    "grocery": (50, 2000),
-    "books": (200, 1500),
-    "beauty": (200, 5000),
-    "toys": (300, 8000),
-    "fashion": (500, 15000),
-    "sports": (500, 20000),
-    "home": (2000, 40000),
-    "electronics": (1000, 150000),
-}
 
-# Fixed list price per product (implicit currency INR), each inside its
-# category band. The product dimension uses the same prices.
+class ShopDataError(Exception):
+    """A shop_master CSV is missing, lacks a required column or has a bad value."""
+
+
+def parse_flag(value):
+    # P2 exports booleans as PostgreSQL text: "t" / "f".
+    if value not in ("t", "f"):
+        raise ValueError(f"expected 't' or 'f', got {value!r}")
+    return value == "t"
+
+
+def parse_customer(row):
+    return {
+        "customer_id": int(row["customer_id"]),
+        # The event and reference-data names for P2's columns.
+        "profile": {
+            "user_name": row["customer_name"],
+            "email": row["email"],
+            "gender": row["gender"],
+            "age": int(row["age"]),
+            "membership_tier": row["membership_tier"],
+            "loyalty_points": int(row["loyalty_points"]),
+            "preferred_language": row["preferred_language"],
+            "home_city": row["home_city"],
+            "home_state": row["home_state"],
+            "user_segment": row["customer_segment"],
+            "is_prime_user": parse_flag(row["is_prime_user"]),
+            "country": row["country"],
+        },
+        "signup_date": date.fromisoformat(row["signup_date"]),
+    }
+
+
+def parse_product(row):
+    if row["product_status"] not in PRODUCT_STATUSES:
+        raise ValueError(f"unknown product_status {row['product_status']!r}")
+    if row["category"] not in CATEGORY_SEARCH_QUERIES:
+        raise ValueError(f"category {row['category']!r} has no CATEGORY_SEARCH_QUERIES entry")
+    return {
+        "product_id": int(row["product_id"]),
+        "product_name": row["product_name"],
+        "category": row["category"],
+        "brand": row["brand"],
+        "is_active": row["product_status"] == "active",
+        "original_price": float(row["original_price"]),
+    }
+
+
+def read_shop_csv(root, file_name, required_columns, parse_row, key):
+    path = os.path.join(root, SHOP_MASTER_DIR, file_name)
+    if not os.path.isfile(path):
+        raise ShopDataError(f"{path} not found (set PROJECT1_ROOT to the repository root)")
+
+    with open(path, newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        missing = [column for column in required_columns if column not in (reader.fieldnames or [])]
+        if missing:
+            raise ShopDataError(f"{path} lacks required column(s): {', '.join(missing)}")
+
+        rows = []
+        seen = set()
+        for row in reader:
+            try:
+                parsed = parse_row(row)
+            except (TypeError, ValueError) as exc:
+                raise ShopDataError(f"{path} line {reader.line_num}: {exc}") from None
+            if parsed[key] in seen:
+                raise ShopDataError(f"{path} line {reader.line_num}: duplicate {key} {parsed[key]}")
+            seen.add(parsed[key])
+            rows.append(parsed)
+
+    if not rows:
+        raise ShopDataError(f"{path} has no rows")
+    return rows
+
+
+def load_shop_master(root):
+    """(customers, products) from P2's shop_master export, in file order."""
+    customers = read_shop_csv(
+        root, "customers.csv", CUSTOMER_COLUMNS, parse_customer, "customer_id"
+    )
+    products = read_shop_csv(root, "products.csv", PRODUCT_COLUMNS, parse_product, "product_id")
+    if len({product["product_name"] for product in products}) != len(products):
+        raise ShopDataError("products.csv: product_name must be unique")
+    return customers, products
+
+
+# Loaded once, at import. A missing file or column stops the producer (and
+# create_reference_data.py, which imports this module) with exit code 2.
+try:
+    SHOP_CUSTOMERS, SHOP_PRODUCTS = load_shop_master(PROJECT_ROOT)
+except ShopDataError as exc:
+    print(f"[producer] error: {exc}", file=sys.stderr, flush=True)
+    sys.exit(2)
+
+# Users are P2's customers. IDs are not contiguous, so sessions pick from this
+# list (file order), never from a numeric range.
+USER_IDS = [customer["customer_id"] for customer in SHOP_CUSTOMERS]
+CUSTOMERS_BY_ID = {customer["customer_id"]: customer for customer in SHOP_CUSTOMERS}
+
+# Catalogue, keyed by product_name (unique in products.csv). PRODUCTS lists
+# discontinued products too; only ACTIVE_PRODUCTS (below) are ever produced.
+PRODUCTS = {}
+for _product in SHOP_PRODUCTS:
+    PRODUCTS.setdefault(_product["category"], []).append(_product["product_name"])
+
+PRODUCT_CATEGORIES = list(PRODUCTS)
+
+PRODUCT_IDS = {product["product_name"]: product["product_id"] for product in SHOP_PRODUCTS}
+
+# List price per product (implicit currency INR).
 PRODUCT_REFERENCE_PRICES = {
-    "iphone_15": 79900.00,
-    "macbook_air": 99900.00,
-    "sony_headphones": 29990.00,
-    "gaming_mouse": 2499.00,
-    "monitor_4k": 24999.00,
-    "nike_shoes": 7995.00,
-    "hoodie": 1999.00,
-    "cargo_pants": 2499.00,
-    "oversized_tshirt": 799.00,
-    "jacket": 4999.00,
-    "facewash": 349.00,
-    "moisturizer": 599.00,
-    "serum": 899.00,
-    "perfume": 2999.00,
-    "air_fryer": 6999.00,
-    "coffee_machine": 12999.00,
-    "vacuum_cleaner": 15999.00,
-    "dumbbells": 2499.00,
-    "yoga_mat": 999.00,
-    "cricket_bat": 3499.00,
-    "atomic_habits": 499.00,
-    "sapiens": 599.00,
-    "python_crash_course": 1499.00,
-    "basmati_rice": 899.00,
-    "olive_oil": 1199.00,
-    "green_tea": 449.00,
-    "lego_set": 4999.00,
-    "rubiks_cube": 499.00,
-    "rc_car": 2999.00,
+    product["product_name"]: product["original_price"] for product in SHOP_PRODUCTS
 }
 
-USER_SEGMENTS = ["new_user", "returning_user", "loyal_customer", "high_spender", "discount_hunter"]
+PRODUCT_BRAND_BY_NAME = {product["product_name"]: product["brand"] for product in SHOP_PRODUCTS}
+
+PRODUCT_ACTIVE_BY_ID = {product["product_id"]: product["is_active"] for product in SHOP_PRODUCTS}
+
+# Lowest and highest list price per category.
+CATEGORY_PRICE_BANDS = {
+    category: (
+        min(PRODUCT_REFERENCE_PRICES[name] for name in names),
+        max(PRODUCT_REFERENCE_PRICES[name] for name in names),
+    )
+    for category, names in PRODUCTS.items()
+}
+
+# Cities the shop's customers live in; an other-city event uses one of these.
+SHOP_CITIES = sorted({customer["profile"]["home_city"] for customer in SHOP_CUSTOMERS})
 
 PAYMENT_METHODS = ["upi", "credit_card", "debit_card", "wallet", "cash_on_delivery", "net_banking"]
 
@@ -173,18 +350,6 @@ TRAFFIC_SOURCES = [
     "email_campaign",
     "push_notification",
 ]
-
-# A search uses a query that fits the session's category.
-CATEGORY_SEARCH_QUERIES = {
-    "electronics": ["iphone", "laptop", "wireless headphones", "gaming mouse", "4k monitor"],
-    "fashion": ["running shoes", "hoodie", "cargo pants", "oversized t-shirt", "winter jacket"],
-    "beauty": ["face wash", "moisturizer", "face serum", "perfume"],
-    "home": ["air fryer", "coffee machine", "vacuum cleaner"],
-    "sports": ["dumbbells", "yoga mat", "cricket bat"],
-    "books": ["atomic habits", "sapiens", "python book"],
-    "grocery": ["basmati rice", "olive oil", "green tea"],
-    "toys": ["lego", "rubiks cube", "remote control car"],
-}
 
 RECOMMENDATION_ALGORITHMS = [
     "collaborative_filtering",
@@ -381,9 +546,25 @@ FUNNEL_STAGE_SCORES = {
 DEFAULT_STAGE_SCORE = -3.0
 STAGE_SCORE_NOISE = 0.4
 
-HOME_COUNTRY = "United States"  # the profiles are US (Faker en_US)
+HOME_COUNTRY = "India"  # P2's shop and every customer in customers.csv
 ABROAD_RATE = 0.05  # events from a random other country
 HOME_CITY_RATE = 0.85  # events from the profile's home_city
+
+# (country, city) for events from abroad; never HOME_COUNTRY.
+ABROAD_LOCATIONS = [
+    ("United Arab Emirates", "Dubai"),
+    ("United States", "New York"),
+    ("United Kingdom", "London"),
+    ("Singapore", "Singapore"),
+    ("Saudi Arabia", "Riyadh"),
+    ("Qatar", "Doha"),
+    ("Canada", "Toronto"),
+    ("Australia", "Sydney"),
+    ("Germany", "Berlin"),
+    ("Nepal", "Kathmandu"),
+    ("Japan", "Tokyo"),
+    ("France", "Paris"),
+]
 
 INITIAL_STOCK_RANGE = (50, 500)
 RESTOCK_BELOW = 5
@@ -400,20 +581,23 @@ def draw_purchase_probability(event_type):
 
 
 def draw_location(profile):
+    home_city = profile["home_city"]
+
     if random.random() < ABROAD_RATE:
-        country = fake.country()
-        while country.startswith("United States"):
-            country = fake.country()
-        # Faker's city names can repeat the home city; an abroad event never uses it.
-        city = fake.city()
-        while city == profile["home_city"]:
-            city = fake.city()
-        return country, city
+        # Another country, and never a city named like the home city.
+        return random.choice(
+            [
+                (country, city)
+                for country, city in ABROAD_LOCATIONS
+                if country != HOME_COUNTRY and city != home_city
+            ]
+        )
 
     # Share of the at-home events that use home_city, so HOME_CITY_RATE holds overall.
     if random.random() < HOME_CITY_RATE / (1 - ABROAD_RATE):
-        return HOME_COUNTRY, profile["home_city"]
-    return HOME_COUNTRY, fake.city()
+        return HOME_COUNTRY, home_city
+    # Another city where the shop has customers.
+    return HOME_COUNTRY, random.choice([city for city in SHOP_CITIES if city != home_city])
 
 
 def draw_discount_percent():
@@ -428,16 +612,14 @@ class Session:
 
     def __init__(self, user_id):
         self.user_id = user_id
-        self.session_id = fake.uuid4()
+        self.session_id = str(uuid.uuid4())
         self.category = random.choice(
             [category for category in PRODUCT_CATEGORIES if ACTIVE_PRODUCTS[category]]
         )
         self.product_name = random.choice(ACTIVE_PRODUCTS[self.category])
 
-        # Within +/-10% of the product's list price; fixed for the session.
-        self.original_price = round(
-            PRODUCT_REFERENCE_PRICES[self.product_name] * random.uniform(0.9, 1.1), 2
-        )
+        # The shop's list price from products.csv; the session's discount varies.
+        self.original_price = PRODUCT_REFERENCE_PRICES[self.product_name]
         self.discount_percent = draw_discount_percent()
         self.discounted_price = round(
             self.original_price - self.original_price * self.discount_percent / 100, 2
@@ -528,21 +710,22 @@ class SessionPool:
     """Up to max_active concurrent sessions; a finished one is replaced."""
 
     def __init__(self, max_active=MAX_ACTIVE_SESSIONS, num_users=None):
+        # num_users caps the users to the first N customers; None means all of them.
         self.num_users = NUM_USERS if num_users is None else num_users
-        if self.num_users < 1:
+        if self.num_users is not None and self.num_users < 1:
             raise ValueError(f"NUM_USERS must be at least 1, got {self.num_users}")
 
-        active_users = sum(
-            account_status(user_id) == "active" for user_id in range(1, self.num_users + 1)
-        )
-        if active_users == 0:
-            raise ValueError(
-                f"NUM_USERS={self.num_users} has no active accounts; use a larger NUM_USERS"
-            )
+        # Customer IDs from customers.csv (not contiguous), active accounts only.
+        self.active_user_ids = [
+            user_id for user_id in USER_IDS[: self.num_users] if account_status(user_id) == "active"
+        ]
+        if not self.active_user_ids:
+            scope = "customers.csv" if self.num_users is None else f"NUM_USERS={self.num_users}"
+            raise ValueError(f"{scope} has no active accounts; use a larger NUM_USERS")
 
         # One session per active user at a time, so never more sessions than
         # active users; otherwise start_session could never find a free user.
-        self.max_active = min(max_active, active_users)
+        self.max_active = min(max_active, len(self.active_user_ids))
         self.active = []
         self.sessions_completed = 0
         self.last_event_at = {}  # user_id -> time of that user's previous event
@@ -551,10 +734,8 @@ class SessionPool:
     def start_session(self):
         # Active accounts only, one session per user at a time.
         busy_users = {session.user_id for session in self.active}
-        user_id = random.randint(1, self.num_users)
-        while user_id in busy_users or account_status(user_id) != "active":
-            user_id = random.randint(1, self.num_users)
-        self.active.append(Session(user_id))
+        free_users = [user_id for user_id in self.active_user_ids if user_id not in busy_users]
+        self.active.append(Session(random.choice(free_users)))
 
     def next_event(self):
         while len(self.active) < self.max_active:
@@ -607,25 +788,11 @@ class SessionPool:
         return remaining
 
 
-@lru_cache(maxsize=None)
 def get_user_profile(user_id):
-    rng = random.Random(user_id)
-
-    profile_fake.seed_instance(user_id)
-
-    return {
-        "user_name": profile_fake.name(),
-        "email": profile_fake.email(),
-        "gender": rng.choice(["male", "female", "other"]),
-        "age": rng.randint(18, 65),
-        "membership_tier": rng.choice(["free", "plus", "premium"]),
-        "loyalty_points": rng.randint(0, 50000),
-        "preferred_language": rng.choice(["english", "hindi", "telugu", "tamil", "kannada"]),
-        "home_city": profile_fake.city(),
-        "home_state": profile_fake.state(),
-        "user_segment": rng.choice(USER_SEGMENTS),
-        "is_prime_user": rng.choice([True, False]),
-    }
+    # The customer's customers.csv row under the event's field names, plus
+    # country. A copy, so a caller can't change the loaded data. KeyError for
+    # an ID that is not in customers.csv.
+    return dict(CUSTOMERS_BY_ID[user_id]["profile"])
 
 
 SIGNUP_MAX_DAYS_AGO = 1199
@@ -635,12 +802,17 @@ INACTIVE_ACCOUNT_ODDS = 25  # 1 account in 25 is inactive
 @lru_cache(maxsize=None)
 def user_reference_attributes(user_id):
     # The users dim's seeded stream, drawn in this order: device preference,
-    # signup offset, account status. Reordering the draws changes every value.
+    # a former signup offset, account status. The offset is still drawn,
+    # though signup_date now comes from customers.csv, so every customer keeps
+    # its device preference and account status. Reordering the draws changes them.
     rng = random.Random(f"users-dim:{user_id}")
+    device_preference = rng.choice(DEVICES)
+    rng.randint(0, SIGNUP_MAX_DAYS_AGO)
+    inactive = rng.randint(1, INACTIVE_ACCOUNT_ODDS) == 1
     return {
-        "device_preference": rng.choice(DEVICES),
-        "signup_days_ago": rng.randint(0, SIGNUP_MAX_DAYS_AGO),
-        "account_status": "inactive" if rng.randint(1, INACTIVE_ACCOUNT_ODDS) == 1 else "active",
+        "device_preference": device_preference,
+        "signup_date": CUSTOMERS_BY_ID[user_id]["signup_date"],
+        "account_status": "inactive" if inactive else "active",
     }
 
 
@@ -649,7 +821,12 @@ def account_status(user_id):
 
 
 def is_product_active(product_id):
-    return product_id % 20 != 0
+    # products.csv product_status == "active".
+    return PRODUCT_ACTIVE_BY_ID[product_id]
+
+
+def draw_ip_address():
+    return ".".join(str(random.randint(1, 254)) for _ in range(4))
 
 
 # Products the producer may pick: active ones only, by category.
@@ -689,7 +866,7 @@ def build_event(session, event_type, now, time_since_last_event_ms, inventory_re
     purchase_probability = draw_purchase_probability(event_type)
 
     return {
-        "event_id": fake.uuid4(),
+        "event_id": str(uuid.uuid4()),
         "session_id": session.session_id,
         "user_id": user_id,
         "user_name": profile["user_name"],
@@ -744,7 +921,7 @@ def build_event(session, event_type, now, time_since_last_event_ms, inventory_re
         "fraud_score": round(random.uniform(0, 1), 4),
         "country": country,
         "city": city,
-        "ip_address": fake.ipv4(),
+        "ip_address": draw_ip_address(),
         "schema_version": "4.0",
         "source": "real-time-personalization-generator",
     }

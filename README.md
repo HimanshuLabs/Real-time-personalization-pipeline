@@ -8,19 +8,19 @@
 
 An end-to-end data pipeline that turns a stream of e-commerce events into per-user personalization features and serves them over an API.
 
-**Kafka → Spark Structured Streaming → Bronze → Silver → Gold → PostgreSQL → FastAPI**, with a dead-letter topic, an atomic serving-table swap, Airflow orchestration and Prometheus/Grafana monitoring. Everything runs locally with Docker; the events are synthetic.
+**Kafka → Spark Structured Streaming → Bronze → Silver → Gold → PostgreSQL → FastAPI**, with a dead-letter topic, an atomic serving-table swap, Airflow orchestration and Prometheus/Grafana monitoring. Everything runs locally with Docker. The events are simulated, as the live clickstream of Project 2's shop: its real customer and product master data, with simulated behaviour.
 
 > Streaming ingestion lands and validates events continuously. Features are computed in batch and published atomically, so the API always reads a complete, consistent table.
 
 ## Highlights
 
-- **Realistic synthetic sessions.** The generator runs up to 20 concurrent user sessions. Each session follows one user and one product through a purchase funnel (entry, search, product views, cart, checkout, payment, order), with catalog prices in INR fixed for the session. Inactive accounts and inactive products never appear in the stream.
+- **The live clickstream of a real shop.** Users and products are Project 2's: 497 customers and 147 products exported from P2's warehouse, with the same IDs, names, cities and list prices. The generator runs up to 20 concurrent sessions; each follows one customer and one product through a purchase funnel (entry, search, product views, cart, checkout, payment, order) at the product's INR list price. Inactive accounts and discontinued products never appear in the stream.
 - **No silent data loss.** Every event lands in exactly one place: Bronze if valid, the dead-letter topic if not. Malformed timestamps and NULLs are routed to the DLQ instead of crashing the stream or vanishing.
 - **Lossless Bronze, dedup in Silver.** Bronze keeps every valid event; duplicates are removed by `event_id` in Silver, so no late event is ever dropped.
 - **Spend, session and recency features.** Gold adds `total_spend`, `session_count` and `recency_hours` to the per-user counts. Price features cover commerce events only, and averages are computed on DECIMAL, so rerunning Gold on the same Silver gives identical feature values; only `features_computed_at` and `recency_hours` change from run to run.
 - **Atomic publishing.** Gold is written to a staging table, validated (non-empty, unique `user_id`) and swapped into the live table in one PostgreSQL transaction. A failed publish leaves the old table untouched.
-- **Graceful operations.** Ctrl+C stops the stream cleanly, and a restart resumes from its checkpoints. Bronze gets no duplicates or gaps across a restart, because Spark's file sink is exactly-once; the DLQ sink is at-least-once, so a restart can write an invalid event to the DLQ twice. Kafka and PostgreSQL data persist on Docker volumes.
-- **Contracts enforced by tests.** 162 tests run the real Spark scripts on small datasets and check exact results, plus the event schema, session and funnel rules, validation rules, API behaviour and the publish swap against a real PostgreSQL. CI runs them on every push to `main` and every pull request to `main`.
+- **Graceful operations.** Ctrl+C stops the stream cleanly, and a restart resumes from its checkpoints, after a checkpoint repair that works around a Spark 4.1 restart crash. Bronze gets no duplicates or gaps across a restart, because Spark's file sink is exactly-once; the DLQ sink is at-least-once, so a restart can write an invalid event to the DLQ twice. Kafka and PostgreSQL data persist on Docker volumes.
+- **Contracts enforced by tests.** 186 tests run the real Spark scripts on small datasets and check exact results, plus the event schema, session and funnel rules, validation rules, API behaviour and the publish swap against a real PostgreSQL. All 186 pass locally with `P1_TEST_DATABASE_URL` set (0 skipped). CI runs them on every push to `main` and every pull request to `main`, and there they always all run.
 - **Observable.** Prometheus scrapes the API and two exporters; Grafana shows API request rate, p95 latency and 5xx rate, Kafka throughput, DLQ rate, feature freshness and the age of the last published feature run.
 
 ## Architecture
@@ -59,19 +59,17 @@ One end-to-end run, following the quick start below:
 
 | Stage | Result |
 |---|---|
-| Producers | 3 producer processes for 10 minutes; 2,323 events delivered (771 / 787 / 765), every producer exited 0 |
-| Kafka `user_events` | 2,323 events across 3 partitions (766 / 823 / 734) |
-| Dead-letter topic | 0 events: the producer only emits valid events (rejection paths are covered by the validation tests) |
-| Bronze | 2,323 rows, 2,323 distinct `event_id`s |
-| Silver | 2,323 rows (`bronze_rows` 2,323, `rows_dropped_by_filters` 0, `duplicates_removed` 0), 0 missing user references, 0 missing product references |
-| Gold and PostgreSQL | 397 users in 415 sessions, one row per user; PostgreSQL matches Gold exactly |
-| Purchases | 28 (about 6.7% of sessions) |
-| Total spend | 436,831.61 INR, the same in Silver, Gold and PostgreSQL |
-| Browse-only users | 19 users with no commerce event, so their price features are NULL |
-| API | `/health` 200; `/features/{id}` 200 (including `total_spend`, `session_count` and `recency_hours`), 404 and 422 as specified; `GET /features` paged all 397 users in 4 requests (`limit=100`), each once, in ascending `user_id` order, with no `user_name` or `membership_tier` |
-| Monitoring | all 4 Prometheus targets up, feature exporter up, features computed age about 4 minutes after the publish |
-
-The stream ran until its checkpoint matched Kafka's end offsets, then stopped cleanly.
+| Kafka `user_events` | 2,793 events across 3 partitions (971 / 964 / 858) |
+| Dead-letter topic | 0 events |
+| Stream restart | the stream crashed on a restart (Spark issue [#55236](https://github.com/apache/spark/issues/55236)); the checkpoint repair ran and the stream resumed |
+| Bronze | 2,793 rows, 2,793 distinct `event_id`s |
+| Silver | 2,793 rows (0 dropped by filters, 0 duplicates), 0 missing user references, 0 missing product references |
+| Gold and PostgreSQL | 321 users in 545 sessions, one row per user |
+| Purchases | 26 |
+| Total spend | 90,052.69 INR |
+| Browse-only users | 13 users with no commerce event, so their price features are NULL |
+| Match with Project 2 | every published user matches its P2 customer (name and tier) |
+| API | `/health` 200; `/features/22` 200; `/features/1` 404 (customer 1 was quarantined in P2, so P1 never produces it); `/features/abc` 422; `GET /features` paged all 321 users in 4 requests (`limit=100`), each once, in ascending `user_id` order, with no `user_name`, `membership_tier` or `email` |
 
 Counts vary from run to run, because the producer generates random sessions.
 
@@ -175,6 +173,10 @@ The batch scripts resolve `data/` and `logs/` from `PROJECT1_ROOT` (default: the
 
 ### Synthetic events
 
+**The shop.** P1 is the live clickstream of Project 2's shop. Its users and catalogue come from `reference-data/shop_master/customers.csv` (497 customers) and `products.csv` (147 products: 138 active, 9 discontinued), a read-only export of P2's warehouse: the current SCD2 rows of `warehouse.dim_customer` and `warehouse.dim_product`, exported on 2026-11-18 from P2 `main` at `c1e117a`. The events therefore carry P2's customer IDs, names, cities, products and list prices; only the behaviour is simulated (no Faker). The producer loads both files once from `PROJECT1_ROOT` and exits 2 with a one-line error if a file or a required column is missing.
+
+**Role next to P2.** P1's events are live product behaviour, for personalization, ML and AI. P2's own web events are its marketing feed, which ties sessions to campaigns. Both share the same customers and products.
+
 `data-generator/producer.py` keeps up to 20 sessions active (`MAX_ACTIVE_SESSIONS`). Each loop picks one active session at random, emits its next event with the current UTC time, and replaces a finished session with a new one. A session belongs to one user (within one producer process, a user has at most one active session at a time), shares one `session_id` across its events, and follows one product, whose price is fixed for the session.
 
 Each session follows this funnel, one event per step:
@@ -188,10 +190,11 @@ Each session follows this funnel, one event per step:
 
 Products and prices:
 
-- **Catalog:** 29 products in 8 categories; `product_id` is fixed per product (the sorted product names are numbered from 10000).
-- **Prices:** every product has a fixed list price in `PRODUCT_REFERENCE_PRICES` (INR; the events carry no currency field), inside its category's band in `CATEGORY_PRICE_BANDS`. A session's `original_price` is the list price × 0.9 to 1.1. Its `discount_percent` is 0–15% in 85% of sessions and 15–40% otherwise.
+- **Users:** the customer IDs in `customers.csv`. They are not contiguous (IDs 1–3 are quarantined in P2), so a session picks from that list. A profile is the customer's row: `user_name`, `email`, `gender`, `age`, `membership_tier`, `loyalty_points`, `preferred_language`, `home_city`, `home_state`, `user_segment` (P2's `customer_segment`) and `is_prime_user`.
+- **Catalog:** the 147 products of `products.csv` in 6 categories (Electronics, Fashion, Home, Beauty, Fitness, Books); `product_id` is P2's `product_id`.
+- **Prices:** every product's list price is its `original_price` in `products.csv` (`PRODUCT_REFERENCE_PRICES`; INR, the events carry no currency field), and `CATEGORY_PRICE_BANDS` is the lowest and highest list price per category. A session's `original_price` is the list price; only the discount varies per session: `discount_percent` is 0–15% in 85% of sessions and 15–40% otherwise.
 - **Product fields:** `PRODUCT_FIELDS` (`product_id`, `product_name`, `category`, `quantity`, `original_price`, `discount_percent`, `discounted_price`, `cart_value`) are NULL on non-commerce events. On commerce events, `quantity` is 1 until `add_to_cart` and the cart quantity from then on. `cart_value` = `discounted_price × quantity` is set only on cart events (`add_to_cart`, `remove_from_cart`, `checkout_started`, `payment_initiated`, `payment_success`, `payment_failed`, `order_placed`).
-- **Status:** `producer.py` defines `account_status` (1 account in 25 is inactive; 231 of 5,000) and `is_product_active` (`product_id % 20 != 0`; `air_fryer` and `perfume` are inactive). The reference dims use the same functions. The producer never starts a session for an inactive account and never picks an inactive product.
+- **Status:** `producer.py` defines `account_status` (a seeded draw per customer, 1 account in 25 inactive; 24 of the 497 customers) and `is_product_active` (`product_status` is `active` in `products.csv`; 9 products are discontinued). The reference dims use the same functions. The producer never starts a session for an inactive account and never picks a discontinued product.
 
 Other fields follow the session and user state:
 
@@ -200,7 +203,7 @@ Other fields follow the session and user state:
 - `time_since_last_event_ms` is the real gap since the same user's previous event. It is NULL on a user's first event since the producer started, and for a gap too large for Bronze's 32-bit column.
 - `session_duration_sec` counts seconds since the session's first event; `items_viewed_in_session` and `repeat_product_view_count` count the session's product views so far.
 - `purchase_probability` is a logistic function of the funnel stage plus small noise, so it rises from browsing to payment and stays strictly between 0 and 1.
-- `city` is the user's `home_city` on about 85% of events, and `country` is `"United States"` on about 95%.
+- `country` is `"India"` on about 95% of events, and `city` is the user's `home_city` on about 85%. The other Indian events use another city where the shop has customers; events from abroad use a fixed list of foreign (country, city) pairs.
 - `inventory_remaining` is a per-product stock level (starting at 50 to 500) that drops by the cart quantity on `payment_success` and is restocked once it falls below 5. It is NULL on non-commerce events.
 - `user_journey_stage` follows the event type (`JOURNEY_STAGE_BY_EVENT_TYPE`): `discovery` for `home_page_view`, `login`, `search`, `ad_impression` and `ad_click`; `consideration` for product views, `image_zoom`, `wishlist_add` and recommendation events; `checkout` from `add_to_cart` through the payment events; `post_purchase` for `order_placed`, `review_submitted` and `rating_given`. `logout` keeps the session's latest stage. The `comparison` value in `USER_JOURNEY_STAGES` is never emitted.
 - `device_type`, `operating_system`, `browser`, `network_type` and `app_version` are drawn once per session and fit together: mobile and tablet run `android` or `ios` on `wifi`, `4g` or `5g`; desktop runs `windows`, `macos` or `linux` on `wifi` or `ethernet`; `safari` appears only on `ios` and `macos`.
@@ -211,35 +214,35 @@ Other fields follow the session and user state:
 `COMMERCE_EVENT_TYPES`, the events that concern a product, are `product_view`, `image_zoom`, `wishlist_add`, `wishlist_remove`, `add_to_cart`, `remove_from_cart`, `checkout_started`, `payment_initiated`, `payment_success`, `payment_failed`, `order_placed`, `order_cancelled`, `return_requested`, `review_submitted`, `rating_given`, `recommendation_impression`, `recommendation_click` and `search_result_click`. Tests keep `EVENT_TYPES` and `COMMERCE_EVENT_TYPES` identical in the producer and the stream, and `COMMERCE_EVENT_TYPES` identical in Gold.
 
 <details>
-<summary><b>Example event</b> (schema 4.0, an <code>add_to_cart</code> produced by <code>generate_event()</code>)</summary>
+<summary><b>Example event</b> (schema 4.0, an <code>add_to_cart</code> for P2 customer 196)</summary>
 
 ```json
 {
   "event_id": "17d6fbd9-ca5d-4b3f-a041-776ed0a1d6c2",
   "session_id": "338109cf-e8c1-4244-b9de-99949a2d5959",
-  "user_id": 782,
-  "user_name": "Dawn Hunt",
-  "email": "qnguyen@example.com",
-  "gender": "other",
-  "age": 25,
-  "membership_tier": "plus",
-  "loyalty_points": 20898,
-  "preferred_language": "kannada",
-  "home_city": "Masonburgh",
-  "home_state": "Illinois",
+  "user_id": 196,
+  "user_name": "Samarth Kunda",
+  "email": "samarth.kunda196@example.net",
+  "gender": "Male",
+  "age": 34,
+  "membership_tier": "Bronze",
+  "loyalty_points": 1618,
+  "preferred_language": "Marathi",
+  "home_city": "Nashik",
+  "home_state": "Maharashtra",
   "event_time": "2026-11-11T07:09:53.610454+00:00",
   "event_type": "add_to_cart",
   "user_journey_stage": "checkout",
-  "user_segment": "loyal_customer",
+  "user_segment": "Working Professional",
   "is_prime_user": false,
-  "product_id": 10001,
-  "product_name": "atomic_habits",
-  "category": "books",
+  "product_id": 92,
+  "product_name": "Vastrio Cotton Kurta",
+  "category": "Fashion",
   "quantity": 1,
-  "original_price": 525.38,
+  "original_price": 1549.0,
   "discount_percent": 0.66,
-  "discounted_price": 521.91,
-  "cart_value": 521.91,
+  "discounted_price": 1538.78,
+  "cart_value": 1538.78,
   "inventory_remaining": 494,
   "search_query": null,
   "time_on_page_sec": 64.65,
@@ -268,8 +271,8 @@ Other fields follow the session and user state:
   "api_latency_ms": 91,
   "page_load_time_ms": 5176,
   "fraud_score": 0.2179,
-  "country": "United States",
-  "city": "Masonburgh",
+  "country": "India",
+  "city": "Nashik",
   "ip_address": "62.105.10.253",
   "schema_version": "4.0",
   "source": "real-time-personalization-generator"
@@ -298,9 +301,11 @@ An event is valid only if all of these hold:
 
 All rules feed one `is_valid` column wrapped in `coalesce(..., false)`, so a NULL in any checked column, a message that isn't valid JSON, an empty value or a NULL Kafka value goes to the DLQ instead of disappearing from both outputs.
 
+**Checkpoint repair before each start.** On Spark 4.1.x, restarting a query whose checkpoint holds a planned but uncommitted batch (`offsets/N` without `commits/N`, which a stop can leave behind) crashes with a `NullPointerException` in `KafkaMicroBatchStream.metrics`: replaying that batch calls `metrics()` before `latestOffset()` ([apache/spark#55236](https://github.com/apache/spark/issues/55236)). So `scripts/run_stream.sh` first runs `scripts/repair_stream_checkpoints.py`, which looks only at the highest batch of each checkpoint under `PROJECT1_ROOT`. If Bronze's file sink already recorded that batch (`data/bronze/user_events/_spark_metadata/N` or `N.compact`), the data is already in Bronze, so the script writes `commits/N` as a copy of the latest commit file. Otherwise, and always for the DLQ (an at-least-once Kafka sink), it moves `offsets/N` and its `.N.crc` into `checkpoints/<query>/_repaired/`, and Spark replans batch N from commit N-1. It never deletes anything, prints one line per action and does nothing when no batch is pending. If it fails, the stream does not start.
+
 ### Batch feature computation
 
-1. **Reference data:** `create_reference_data.py` builds the users dim (`user_id` 1..`NUM_USERS`) and the products dim (the producer's catalog) from the producer's own profiles, catalog, list prices and status functions, so every id the producer can emit has a reference row. Derived columns use fixed seeds, so the output is identical on every run.
+1. **Reference data:** `create_reference_data.py` builds the users dim (every customer in `customers.csv`) and the products dim (every product in `products.csv`, brand included) from the data the producer loads, with its list prices and status functions, so every id the producer can emit has a reference row. `signup_date` comes from the CSV; `device_preference` and `account_status` use fixed seeds, so the output is identical on every run.
 2. **Silver:** `bronze_to_silver.py` drops rows missing `user_id`, `event_type` or `event_timestamp`, removes duplicate `event_id`s, left-joins both dims and keeps the event's own `user_segment`. Its report (`logs/silver_enrichment_report.json`) counts `bronze_rows`, `rows_dropped_by_filters`, `duplicates_removed` and the Silver rows, read back from the Silver actually written. `is_user_reference_missing` flags users without a dim row; `is_product_reference_missing` flags events that have a `product_id` without a dim row, so non-commerce events are never flagged.
 3. **Gold:** `silver_to_gold.py` aggregates Silver to one row per `user_id`. Price features use commerce events only. Averages and `total_spend` are computed on DECIMAL, rounded half up and stored as DOUBLE, so the result doesn't depend on the order Spark adds the rows. One `features_computed_at` timestamp is taken per run, and `recency_hours` is measured against it.
 4. **Publish:** `publish_gold_to_postgres.py` writes Gold to `user_features_staging` over JDBC, then in one transaction checks that staging is non-empty with unique `user_id`s, adds the primary key, drops `user_features`, renames staging to `user_features` and renames the key to `user_features_pkey`. Any failure rolls back and leaves the live table as it was. Queries already running finish first, because the swap waits for their locks; queries that arrive during the swap wait for its brief lock and then read the new table. The swap waits at most 10 seconds for a lock (`SET LOCAL lock_timeout`, `SWAP_LOCK_TIMEOUT`): if a session holds `user_features` longer, the publish rolls back, leaves the live table unchanged and exits non-zero with a message saying so, instead of blocking the swap and every API read queued behind it.
@@ -361,8 +366,8 @@ Every Spark job runs with `spark.sql.session.timeZone=UTC`. The Airflow DAG `pro
 | `POSTGRES_DB` | `personalization_db` | same as above |
 | `POSTGRES_USER` | `de_user` | same as above |
 | `POSTGRES_PASSWORD` | `de_password` | same as above |
-| `PROJECT1_ROOT` | the repository root | where `data/`, `checkpoints/` and `logs/` live: `read_stream.py`, the reference-data, Silver, Gold, publish and query scripts, and the Airflow DAG (task working directory) |
-| `NUM_USERS` | `5000` | `producer.py` and `create_reference_data.py`; use the same value for both. Must be at least 1. The producer runs at most 20 sessions and never more than the number of active accounts (`NUM_USERS=10` has 8, so 8 sessions); with no active account it exits 2 with a one-line error |
+| `PROJECT1_ROOT` | the repository root | where `data/`, `checkpoints/`, `logs/` and `reference-data/shop_master/` live: `producer.py`, `read_stream.py`, `scripts/repair_stream_checkpoints.py`, the reference-data, Silver, Gold, publish and query scripts, and the Airflow DAG (task working directory) |
+| `NUM_USERS` | unset (every customer) | `producer.py` only: an optional cap to the first N customers of `customers.csv`. Must be at least 1. The producer runs at most 20 sessions and never more than the number of active accounts; with no active account it exits 2 with a one-line error. The users dim always holds every customer |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | `producer.py` and `read_stream.py` (both the `user_events` source and the `user_events_dlq` sink) |
 | `SPARK_KAFKA_VERSION` | `4.1.2` | `scripts/run_stream.sh` (Spark Kafka connector version) |
 | `GRAFANA_ADMIN_PASSWORD` | generated and printed once if unset | `monitoring/run_monitoring.sh` |
@@ -374,7 +379,7 @@ The feature-freshness exporter's own default host is `host.docker.internal`; `ru
 ## Operations
 
 - **Stop the stream:** press Ctrl+C (or `kill -TERM -<pgid>`) in the `scripts/run_stream.sh` terminal. Both queries and Spark stop, the stream prints `[stream] stopped cleanly` and exits 0. This works at any moment, including start-up: the script catches the signal and writes a per-run stop file (`STREAM_STOP_FILE`, in a fresh `mktemp -d` folder that is removed when the script exits), which `read_stream.py` checks at start, before starting the queries and every second, so a signal sent while `spark-submit` is still launching the JVM stops the job before any query starts. The JVM ignores SIGINT/SIGTERM, so it is never killed mid-batch; the Python driver also handles a signal that reaches it directly and shuts down in order. The script exits with `spark-submit`'s status.
-- **Restart the stream:** it resumes from `checkpoints/bronze_user_events` and `checkpoints/dlq`. Bronze is exactly-once across restarts (the file sink commits each batch to `_spark_metadata`); the DLQ sink is at-least-once, so a batch that was in flight when the stream stopped can be written to `user_events_dlq` again.
+- **Restart the stream:** it resumes from `checkpoints/bronze_user_events` and `checkpoints/dlq`, after the checkpoint repair (see *Streaming ingestion and validation*); batches it set aside are kept in `checkpoints/<query>/_repaired/`. Bronze is exactly-once across restarts (the file sink commits each batch to `_spark_metadata`); the DLQ sink is at-least-once, so a batch that was in flight when the stream stopped can be written to `user_events_dlq` again.
 - **Reset the stream** (re-read Kafka from the start): stop it, then move **both** `checkpoints/` **and** `data/bronze/user_events` out of the repository. The Bronze folder holds the file sink's own log (`_spark_metadata`); a new checkpoint paired with an old `_spark_metadata` makes the sink skip new batches without an error. After a reset, the DLQ query re-reads the topic too, so invalid events already in the DLQ are written there again.
 - **Data persistence:** Kafka data lives on the `kafka_data` volume and PostgreSQL data on `postgres_data`; both survive container recreation. Kafka keeps every event (`KAFKA_LOG_RETENTION_MS: -1`; the broker default would delete them after 7 days), so a stream reset can always re-read the whole topic. Never run `docker compose down -v`, which deletes both volumes.
 - **Airflow:** the DAG's Python dependencies are in `requirements-airflow.txt`; `apache-airflow-providers-standard==1.13.1` is the version pinned in Airflow's official 3.2.2 constraints file. Its tasks call `spark-submit`, so it must be on the worker's PATH. The file is `dags/project1_personalization_pipeline.py` but the `dag_id` is `project1_personalization_batch_pipeline`; they differ on purpose, because the local Airflow metadata database records past runs under that `dag_id` and renaming it would orphan them.
@@ -388,7 +393,7 @@ The feature-freshness exporter's own default host is `host.docker.internal`; `ru
 | One coalesced `is_valid` column | Every event lands in exactly one of Bronze and the DLQ; a NULL can't slip past both filters. |
 | Product fields required only on commerce events | Logins, searches and page views carry no product, and a product or price that is present is still checked. |
 | Staging-table swap | Readers never see a missing, empty or partially written serving table, and a failed publish changes nothing. |
-| Reference dims generated from the producer | Every id the producer emits has a reference row, the dims use the producer's list prices and status rules, and rebuilding them is deterministic. |
+| Reference dims built from the producer's shop data | The producer and the dims load the same P2 export, so every id the producer emits has a reference row with the same list price and status, and rebuilding them is deterministic. |
 | Averages on DECIMAL | Rounding doesn't depend on the order Spark adds the rows, so the same Silver always gives the same feature values (only `features_computed_at` and `recency_hours` change per run). |
 | Spark sessions in UTC | Timestamps mean the same thing on every machine; PostgreSQL stores `timestamp with time zone`. |
 | Signals handled by the Python driver only | A terminal Ctrl+C stops the queries in order instead of killing the JVM mid-batch. |
@@ -402,11 +407,12 @@ python -m pytest -q
 
 | File | Tests | Covers |
 |---|---:|---|
-| `tests/test_batch_pipeline.py` | 15 | the real reference, Silver, Gold and query scripts on a tiny Bronze, run from another directory with `PROJECT1_ROOT` set (nothing written outside it): duplicate removed, event `user_segment` kept, no column named just `price` while the dim's list price is present as `reference_price`, product-reference flag only for an unknown product, Gold schema (19 columns, names and types in order), commerce-only and DECIMAL-rounded price features, exact `total_spend`, `session_count` and `recency_hours`, dim status equal to the producer's functions, Silver report counts (Bronze rows, rows dropped by filters, duplicates removed, Silver rows), parquet dims only (no CSV copies), every batch script has `main()` and starts no Spark on import, Gold fails clearly without Silver |
-| `tests/test_stream_validation.py` | 44 | one DLQ case per validation rule (required fields, contract, scores, `engagement_score`, future `event_time`, product and price rules, `cart_value` NULL / negative / mismatched), non-JSON, empty and NULL Kafka values; valid cases at the edges (login without product fields, `cart_value` within rounding, `engagement_score` 0, `event_time` 30 minutes ahead); the DLQ holds exactly the invalid cases, valid + invalid = input, Bronze/DLQ columns unchanged, `KAFKA_BOOTSTRAP_SERVERS` read for both the source and the DLQ sink, importing the stream module starts no Spark, SIGINT or SIGTERM during start-up stops cleanly without starting a query; with a real local SparkSession, `main()` has its own SIGINT/SIGTERM handlers back in place after PySpark installs its SIGINT handler; the launcher's stop file stops the job cleanly when present at start (Spark not started), during start-up (no query started) and while running (both queries stopped); `scripts/run_stream.sh` with a fake `spark-submit`: valid bash, a fresh stop-file path per run that doesn't exist yet and is removed at exit, `spark-submit`'s exit status passed through, a group SIGINT or SIGTERM (sent twice) turned into the stop file while `spark-submit` ignores both signals |
+| `tests/test_batch_pipeline.py` | 16 | the real reference, Silver, Gold and query scripts on a tiny Bronze, run from another directory with `PROJECT1_ROOT` set (nothing written outside it): duplicate removed, event `user_segment` kept, no column named just `price` while the dim's list price is present as `reference_price`, product-reference flag only for an unknown product, Gold schema (19 columns, names and types in order), commerce-only and DECIMAL-rounded price features, exact `total_spend`, `session_count` and `recency_hours`, dim status equal to the producer's functions, dims equal to the shop CSVs (every customer with its `signup_date`; every product with its name, category, brand, list price and status), Silver report counts (Bronze rows, rows dropped by filters, duplicates removed, Silver rows), parquet dims only (no CSV copies), every batch script has `main()` and starts no Spark on import, Gold fails clearly without Silver |
+| `tests/test_stream_validation.py` | 44 | one DLQ case per validation rule (required fields, contract, scores, `engagement_score`, future `event_time`, product and price rules, `cart_value` NULL / negative / mismatched), non-JSON, empty and NULL Kafka values; valid cases at the edges (login without product fields, `cart_value` within rounding, `engagement_score` 0, `event_time` 30 minutes ahead); the DLQ holds exactly the invalid cases, valid + invalid = input, Bronze/DLQ columns unchanged, `KAFKA_BOOTSTRAP_SERVERS` read for both the source and the DLQ sink, importing the stream module starts no Spark, SIGINT or SIGTERM during start-up stops cleanly without starting a query; with a real local SparkSession, `main()` has its own SIGINT/SIGTERM handlers back in place after PySpark installs its SIGINT handler; the launcher's stop file stops the job cleanly when present at start (Spark not started), during start-up (no query started) and while running (both queries stopped); `scripts/run_stream.sh` with a fake `spark-submit` and `PROJECT1_ROOT` in a temporary folder (the repository's checkpoints are never repaired by a test): valid bash, a fresh stop-file path per run that doesn't exist yet and is removed at exit, `spark-submit`'s exit status passed through, a group SIGINT or SIGTERM (sent twice) turned into the stop file while `spark-submit` ignores both signals |
+| `tests/test_stream_checkpoints.py` | 15 | the checkpoint repair on fake checkpoints: a pending Bronze batch already in the sink log (`N` or `N.compact`) gets `commits/N` with the latest commit's bytes and checksum; without sink metadata, and always for the DLQ, `offsets/N` and its `.crc` move to `_repaired/`; one line per action; a clean, missing or empty checkpoint is left unchanged; a second run changes nothing more; an earlier repair is never overwritten; the first commit uses Spark's default format; `scripts/run_stream.sh` repairs before `spark-submit` and does not start it when the repair fails |
 | `tests/test_feature_api.py` | 33 | every endpoint through real HTTP requests to the ASGI app, with a fake database: `GET /` message; `GET /metrics` Prometheus text, with series for `/features/{user_id}` and none for `/metrics` itself; `GET /health` 200 and each 503 reason (database unavailable, table missing, table empty); `GET /features/{user_id}` 200 with exactly the 16 feature keys and no `user_name` or `membership_tier`, 404, 422 for a non-integer id (no database call), 500; error bodies carry no credentials or exception text; `GET /features` first, middle, last and empty pages, an exactly full last page ends the walk, full walks with no gaps, repeats or empty extra request, limit and `after_user_id` bounds (422), item keys, 500, parameterised SQL; `POSTGRES_*` honoured and every connection uses the 3-second connect timeout |
 | `tests/test_feature_exporter.py` | 4 | the feature-freshness exporter with a fake database: DB up sets `project1_features_computed_age_seconds` from `MAX(features_computed_at)` and the other gauges exactly; an empty table gives -1 ages; DB down after a good scrape gives `exporter_up 0` and NaN for every gauge; the age comes back when the DB does |
-| `tests/test_producer_contract.py` | 43 | 58 keys in order, schema 4.0, catalog prices and bands, product fields NULL on non-commerce events, one user, product and price per session, funnel order, field consistency rules, journey stage by event type, device context fixed and consistent per session, `payment_method` only on payment events, no inactive account or product, no Kafka connection on import; running the producer with a stub Kafka client: exit 0 when all delivered, 1 on a failed or undelivered event, SIGTERM stops like Ctrl+C (flush and summary), a second SIGINT/SIGTERM (real signals to a producer process whose final flush is slow) still gives the summary, exit 0 and no traceback, `NUM_USERS=10` runs without hanging, `NUM_USERS=0` and no active accounts give a clear error, `KAFKA_BOOTSTRAP_SERVERS` and `enable.idempotence` in the producer config |
+| `tests/test_producer_contract.py` | 51 | 58 keys in order, schema 4.0, catalog prices and bands, product fields NULL on non-commerce events, one user, product and price per session, funnel order, field consistency rules, journey stage by event type, device context fixed and consistent per session, `payment_method` only on payment events, no Kafka connection on import; the shop: every event's profile fields equal its `customers.csv` row, every product id, name, category and list price matches `products.csv`, no inactive account or discontinued product, only customer IDs from the CSV, home and abroad locations, `NUM_USERS` caps to the first customers, no Faker import, a missing CSV or required column exits 2 with a one-line error; running the producer with a stub Kafka client: exit 0 when all delivered, 1 on a failed or undelivered event, SIGTERM stops like Ctrl+C (flush and summary), a second SIGINT/SIGTERM (real signals to a producer process whose final flush is slow) still gives the summary, exit 0 and no traceback, `NUM_USERS=10` runs without hanging, `NUM_USERS=0` and no active accounts give a clear error, `KAFKA_BOOTSTRAP_SERVERS` and `enable.idempotence` in the producer config |
 | `tests/test_project_structure.py` | 5 | required files exist, runtime folders are git-ignored, `EVENT_TYPES` and `COMMERCE_EVENT_TYPES` match across the producer, stream and Gold, `CART_EVENT_TYPES` matches across the producer and stream and is a subset of `COMMERCE_EVENT_TYPES` |
 | `tests/test_publish_swap.py` | 17 | the publish swap. Unit (fake connection): statement order with `SET LOCAL lock_timeout` first, empty and duplicate staging refused before any change, a failure at any step rolls back, a lock timeout exits 1 with the clean message and no driver text. Integration (real PostgreSQL, a throwaway `p1_publish_test` database): the swap replaces the table (new OID, `user_features_pkey`, correct rows), empty / duplicate / NULL-`user_id` staging leaves the live table unchanged, a held lock times out and leaves it unchanged, two swaps in a row succeed; the Gold path resolves from `PROJECT1_ROOT` |
 | `tests/test_python_syntax.py` | 1 | every Python file parses |
@@ -430,8 +436,8 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 ├── data-generator/         Kafka event producer
 ├── docs/                   architecture notes and full diagram
 ├── monitoring/             Prometheus, Grafana, exporters, start/stop scripts
-├── reference-data/         users and products dims
-├── scripts/run_stream.sh   stream launcher with clean Ctrl+C handling
+├── reference-data/         P2 shop master export and the users and products dims
+├── scripts/                stream launcher (clean Ctrl+C handling) and checkpoint repair
 ├── spark-batch/            Bronze → Silver → Gold → PostgreSQL jobs
 ├── spark-streaming/        Kafka → Bronze / DLQ streaming job
 ├── tests/                  pytest suite
@@ -452,18 +458,20 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 | 5 of the 26 event types are never emitted: `search_result_click`, `wishlist_remove`, `order_cancelled`, `return_requested` and `delivery_tracking_view`. | Add funnel steps for them. |
 | Some context fields are drawn independently for each event: `traffic_source`, `ab_test_group`, `campaign_id`, `api_latency_ms`, `page_load_time_ms`, `cart_abandonment_probability`, `fraud_score` and `ip_address`. | Keep campaign and experiment fields constant per session and model latency from the device and network. |
 | Each producer process keeps its own sessions, stock levels and per-user gaps, so parallel producers don't share them. | Keep that state in a shared store, or run a single producer. |
+| Every stream start runs `scripts/repair_stream_checkpoints.py` to work around a Spark 4.1.x crash on restart from a planned but uncommitted batch ([apache/spark#55236](https://github.com/apache/spark/issues/55236), closed upstream without a fix). | Remove the repair step from `scripts/run_stream.sh` once a Spark release fixes it. |
+| P1's purchases are simulated and are not reconciled with P2's orders: the two projects share customers and products, not transactions. | Feed P1 purchases into P2's order flow, or reconcile them against P2's orders. |
 | Single Kafka broker, replication factor 1. | A multi-broker cluster with replication factor 3. |
 | The Airflow DAG is syntax-checked in CI but not executed. | A DAG integrity test and a containerised Airflow in the quick start. |
 | Silver keeps one row per `event_id` with `dropDuplicates`, so when two events share an `event_id` but differ in content, which one survives is arbitrary. | Deduplicate on the full payload, or keep the earliest by Kafka offset and send conflicting duplicates to the DLQ. |
 | `user_name` and `membership_tier` come from `MAX_BY(..., event_timestamp)`, so if a user's latest events share the same timestamp with different values, the one picked is arbitrary. | Break ties with a second ordering key, such as the Kafka offset or `event_id`. |
 | One database account: the API, exporter, publish job and DAG all use `de_user`, the superuser that owns `personalization_db`, with demo credentials. | Separate roles per component: a writer for the publish job and a read-only role with `SELECT` on `user_features` for the API, exporter and downstream readers, with passwords from a secrets manager. |
 
-Security and privacy: this is a local demo with default credentials, and the serving table includes a synthetic `user_name`. A production deployment would use a secrets manager and serve IDs and features only.
+Security and privacy: this is a local demo with default credentials, and the serving table includes `user_name`, the name of P2's customer. A production deployment would use a secrets manager and serve IDs and features only.
 
 ## Operational notes
 
 - `scripts/run_stream.sh` makes the JVM ignore SIGINT and SIGTERM and turns them into the stop file, so the Python driver can stop the queries in order. If the driver ever hangs, only SIGKILL stops the JVM.
-- `product_id`s follow the sorted product names, so adding or renaming a product renumbers them. The dims rebuild on every run, but events already in Bronze keep their old ids.
+- `product_id`s and `user_id`s are P2's IDs from the `reference-data/shop_master/` export. A new export can add, retire or change rows; the dims rebuild on every run, but events already in Bronze keep the values they were produced with.
 - The Grafana admin password is passed as an environment variable and is visible through `docker inspect project1_grafana`.
 - The `python:3.11-slim` (API) and `python:3.12-slim` (exporter) base images are tagged by minor version only, so a rebuild can pick up a newer patch release; pin a patch tag or digest for reproducible builds.
 

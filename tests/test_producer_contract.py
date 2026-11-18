@@ -1,5 +1,8 @@
+import ast
+import csv
 import importlib.util
 import os
+import shutil
 import signal
 import statistics
 import subprocess
@@ -13,6 +16,23 @@ import confluent_kafka
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+SHOP_MASTER = ROOT / "reference-data" / "shop_master"
+
+
+def read_shop_csv(file_name, key):
+    # Read independently of producer.py, so the tests compare against the file itself.
+    with open(SHOP_MASTER / file_name, newline="", encoding="utf-8") as file:
+        return {int(row[key]): row for row in csv.DictReader(file)}
+
+
+def shop_customers():
+    return read_shop_csv("customers.csv", "customer_id")
+
+
+def shop_products():
+    return read_shop_csv("products.csv", "product_id")
+
 
 EXPECTED_KEYS = [
     "event_id",
@@ -190,17 +210,15 @@ def test_reference_prices_inside_category_band(producer):
 def test_reference_prices_cover_exactly_the_catalog(producer):
     catalog = {name for names in producer.PRODUCTS.values() for name in names}
     priced = set(producer.PRODUCT_REFERENCE_PRICES)
-    assert len(catalog) == 29
+    assert len(catalog) == 147
     assert not catalog - priced, f"missing prices: {sorted(catalog - priced)}"
     assert not priced - catalog, f"prices for unknown products: {sorted(priced - catalog)}"
 
 
-def test_original_price_within_10_percent_of_reference(producer, commerce_events):
+def test_original_price_is_the_list_price(producer, commerce_events):
     assert commerce_events
     for event in commerce_events:
-        reference = producer.PRODUCT_REFERENCE_PRICES[event["product_name"]]
-        # +0.005: original_price is rounded to 2 decimals after scaling.
-        assert reference * 0.9 - 0.005 <= event["original_price"] <= reference * 1.1 + 0.005, event
+        assert event["original_price"] == producer.PRODUCT_REFERENCE_PRICES[event["product_name"]]
         assert event["discounted_price"] <= event["original_price"]
         assert 0 <= event["discount_percent"] <= 50
 
@@ -373,29 +391,33 @@ def test_location_mostly_home(producer, stream):
     assert all(e["country"] == producer.HOME_COUNTRY for e in stream if e["city"] == e["home_city"])
 
 
-def test_abroad_event_never_uses_home_city(producer, monkeypatch):
-    # Force the abroad branch and make the first two city draws equal the home city.
-    profile = producer.get_user_profile(42)
-    home_city = profile["home_city"]
-    city_draws = iter([home_city, home_city, "Elsewhere"])
+def test_abroad_event_never_uses_home_country_or_city(producer, monkeypatch):
+    # Force the abroad branch, for a profile whose home city shares a name with
+    # an abroad city.
+    abroad_city = producer.ABROAD_LOCATIONS[0][1]
+    profile = dict(producer.get_user_profile(producer.USER_IDS[0]), home_city=abroad_city)
+    monkeypatch.setattr(producer, "ABROAD_RATE", 1.0)
 
-    class ScriptedFaker:
-        city_calls = 0
+    draws = {producer.draw_location(profile) for _ in range(500)}
+    assert draws <= set(producer.ABROAD_LOCATIONS)
+    assert all(country != producer.HOME_COUNTRY for country, _ in draws)
+    assert all(city != abroad_city for _, city in draws)
 
-        def country(self):
-            return "France"
 
-        def city(self):
-            ScriptedFaker.city_calls += 1
-            return next(city_draws)
+def test_home_events_use_home_city_or_another_shop_city(producer, monkeypatch, stream):
+    # Every at-home city is a city the shop's customers live in.
+    cities = {customer["home_city"] for customer in shop_customers().values()}
+    assert set(producer.SHOP_CITIES) == cities
+    home = [e for e in stream if e["country"] == producer.HOME_COUNTRY]
+    assert home and all(e["city"] in cities for e in home)
 
-    monkeypatch.setattr(
-        producer, "random", type("AlwaysAbroad", (), {"random": staticmethod(lambda: 0.0)})
-    )
-    monkeypatch.setattr(producer, "fake", ScriptedFaker())
-
-    assert producer.draw_location(profile) == ("France", "Elsewhere")
-    assert ScriptedFaker.city_calls == 3
+    # The other-city branch never returns the home city.
+    profile = producer.get_user_profile(producer.USER_IDS[0])
+    monkeypatch.setattr(producer, "ABROAD_RATE", 0.0)
+    monkeypatch.setattr(producer, "HOME_CITY_RATE", 0.0)
+    draws = {producer.draw_location(profile) for _ in range(500)}
+    assert all(country == producer.HOME_COUNTRY for country, _ in draws)
+    assert {city for _, city in draws} <= cities - {profile["home_city"]}
 
 
 def test_inventory_drops_on_purchase_and_restocks(producer, stream):
@@ -426,20 +448,35 @@ def test_inventory_drops_on_purchase_and_restocks(producer, stream):
     # Restock path, rarely reached in a short stream: a sale leaving fewer
     # than RESTOCK_BELOW units shows that stock, then the product is restocked.
     pool = producer.SessionPool()
-    session = producer.Session(user_id=1)
+    session = producer.Session(user_id=producer.USER_IDS[0])
     session.cart_quantity = 3
     pool.stock[session.product_name] = producer.RESTOCK_BELOW + 1
     assert pool.inventory_remaining(session, "payment_success") == producer.RESTOCK_BELOW - 2
     assert low <= pool.inventory_remaining(session, "product_view") <= high
 
 
-def test_no_events_from_inactive_accounts_or_products(producer, stream):
-    assert any(producer.account_status(u) == "inactive" for u in range(1, producer.NUM_USERS + 1))
-    assert any(not producer.is_product_active(pid) for pid in producer.PRODUCT_IDS.values())
+def test_no_events_from_inactive_accounts_or_discontinued_products(producer, stream):
+    # Both kinds exist in the shop, so the check below is not vacuous.
+    assert any(producer.account_status(u) == "inactive" for u in producer.USER_IDS)
+    discontinued = {
+        int(row["product_id"])
+        for row in shop_products().values()
+        if row["product_status"] == "discontinued"
+    }
+    assert discontinued
+    assert all(not producer.is_product_active(pid) for pid in discontinued)
+
     for event in stream:
         assert producer.account_status(event["user_id"]) == "active", event
         if event["product_id"] is not None:
+            assert event["product_id"] not in discontinued, event
             assert producer.is_product_active(event["product_id"]), event
+
+    # No pool can start a session for an inactive account or a discontinued product.
+    inactive = {u for u in producer.USER_IDS if producer.account_status(u) == "inactive"}
+    assert not inactive & set(producer.SessionPool().active_user_ids)
+    picked = {name for names in producer.ACTIVE_PRODUCTS.values() for name in names}
+    assert not {producer.PRODUCT_IDS[name] for name in picked} & discontinued
 
 
 def test_remove_from_cart_ends_without_checkout(sessions):
@@ -563,9 +600,11 @@ def test_same_user_same_profile(producer, events):
         profiles[event["user_id"]].add(tuple(event[field] for field in PROFILE_FIELDS))
     assert all(len(seen) == 1 for seen in profiles.values())
 
-    before = producer.get_user_profile(42)
-    producer.get_user_profile.cache_clear()
-    assert producer.get_user_profile(42) == before
+    # get_user_profile returns a copy: changing it never changes later events.
+    user_id = producer.USER_IDS[0]
+    before = producer.get_user_profile(user_id)
+    producer.get_user_profile(user_id)["user_name"] = "Changed"
+    assert producer.get_user_profile(user_id) == before
 
 
 # --- running the producer: exit status, signals, NUM_USERS, broker address ----------
@@ -756,7 +795,7 @@ def test_second_stop_signal_still_flushes_and_prints_the_summary(
 
 
 def test_small_num_users_produces_events_without_hanging(producer):
-    # Users 2 and 4 are inactive, so NUM_USERS=10 has 8 active users and a pool of 8.
+    # NUM_USERS=10 caps the users to the first 10 customers of customers.csv.
     code = (
         "import sys, json\n"
         f"sys.path.insert(0, {str(PRODUCER_SCRIPT.parent)!r})\n"
@@ -775,14 +814,15 @@ def test_small_num_users_produces_events_without_hanging(producer):
     assert result.returncode == 0, result.stderr
 
     max_active, count, users = __import__("json").loads(result.stdout)
-    active = [u for u in range(1, 11) if producer.account_status(u) == "active"]
-    assert max_active == len(active) == 8
+    active = [u for u in producer.USER_IDS[:10] if producer.account_status(u) == "active"]
+    assert 0 < len(active) < 10
+    assert max_active == len(active)
     assert count == 500
     assert set(users) <= set(active)
 
 
 def test_num_users_without_active_accounts_is_a_clear_error(producer, monkeypatch):
-    # Not reachable with the real seeds (user 1 is active), so force it.
+    # Not reachable with the real data, so force it.
     monkeypatch.setattr(producer, "account_status", lambda user_id: "inactive")
 
     with pytest.raises(ValueError, match="NUM_USERS=3 has no active accounts"):
@@ -825,3 +865,142 @@ def test_producer_config_reads_bootstrap_env_and_is_idempotent(monkeypatch):
     assert "localhost:9092" not in PRODUCER_SCRIPT.read_text().replace(
         'os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")', ""
     )
+
+
+# --- the shop: customers.csv and products.csv from P2's warehouse --------------------
+
+# Event field -> customers.csv column, and how the CSV text becomes the event value.
+CUSTOMER_FIELD_SOURCES = {
+    "user_name": ("customer_name", str),
+    "email": ("email", str),
+    "gender": ("gender", str),
+    "age": ("age", int),
+    "membership_tier": ("membership_tier", str),
+    "loyalty_points": ("loyalty_points", int),
+    "preferred_language": ("preferred_language", str),
+    "home_city": ("home_city", str),
+    "home_state": ("home_state", str),
+    "user_segment": ("customer_segment", str),
+    "is_prime_user": ("is_prime_user", lambda value: value == "t"),
+}
+
+
+def test_every_events_profile_equals_its_customers_csv_row(producer, stream):
+    assert sorted(CUSTOMER_FIELD_SOURCES) == sorted(PROFILE_FIELDS)
+    customers = shop_customers()
+    for event in stream:
+        row = customers[event["user_id"]]
+        for field, (column, convert) in CUSTOMER_FIELD_SOURCES.items():
+            assert event[field] == convert(row[column]), (field, event)
+        # Same types as before: bool and int, not CSV text.
+        assert type(event["is_prime_user"]) is bool and type(event["loyalty_points"]) is int
+
+    # get_user_profile is the full row, country included, for every customer.
+    for user_id, row in customers.items():
+        profile = producer.get_user_profile(user_id)
+        assert set(profile) == set(PROFILE_FIELDS) | {"country"}
+        assert profile["country"] == row["country"]
+        assert all(
+            profile[field] == convert(row[column])
+            for field, (column, convert) in CUSTOMER_FIELD_SOURCES.items()
+        )
+        assert (
+            producer.user_reference_attributes(user_id)["signup_date"].isoformat()
+            == (row["signup_date"])
+        )
+
+
+def test_every_events_product_matches_products_csv(producer, stream):
+    products = shop_products()
+    commerce = [event for event in stream if event["product_id"] is not None]
+    assert commerce
+    for event in commerce:
+        row = products[event["product_id"]]
+        assert event["product_name"] == row["product_name"], event
+        assert event["category"] == row["category"], event
+        assert event["original_price"] == float(row["original_price"]), event
+
+    # The producer's catalogue is products.csv, row for row.
+    assert sorted(producer.PRODUCT_IDS.values()) == sorted(products)
+    for product_id, row in products.items():
+        name = row["product_name"]
+        assert producer.PRODUCT_IDS[name] == product_id
+        assert name in producer.PRODUCTS[row["category"]]
+        assert producer.PRODUCT_REFERENCE_PRICES[name] == float(row["original_price"])
+        assert producer.PRODUCT_BRAND_BY_NAME[name] == row["brand"]
+        assert producer.is_product_active(product_id) == (row["product_status"] == "active")
+    assert sorted(producer.PRODUCT_CATEGORIES) == sorted(
+        ["Electronics", "Fashion", "Home", "Beauty", "Fitness", "Books"]
+    )
+
+
+def test_only_customer_ids_from_the_csv_are_produced(producer, stream):
+    customer_ids = set(shop_customers())
+    # IDs 1-3 are quarantined in P2: the IDs are not contiguous.
+    assert not {1, 2, 3} & customer_ids
+    assert producer.USER_IDS == list(shop_customers())
+    produced = {event["user_id"] for event in stream}
+    assert produced <= customer_ids, sorted(produced - customer_ids)
+    assert len(produced) > 100  # many customers, not a handful
+
+
+def test_num_users_caps_to_the_first_customers(producer):
+    pool = producer.SessionPool(num_users=5)
+    assert set(pool.active_user_ids) <= set(producer.USER_IDS[:5])
+    assert producer.SessionPool().active_user_ids == [
+        u for u in producer.USER_IDS if producer.account_status(u) == "active"
+    ]
+
+
+def test_producer_never_imports_faker():
+    tree = ast.parse(PRODUCER_SCRIPT.read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "faker" not in {name.lower() for name in imported}
+    assert "faker" not in PRODUCER_SCRIPT.read_text().lower()
+
+
+def run_producer_with_root(root):
+    return subprocess.run(
+        [sys.executable, str(PRODUCER_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PROJECT1_ROOT": str(root), "KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:1"},
+    )
+
+
+def test_missing_shop_csv_exits_2_with_a_clear_message(tmp_path):
+    result = run_producer_with_root(tmp_path)
+
+    assert result.returncode == 2
+    expected = tmp_path / "reference-data" / "shop_master" / "customers.csv"
+    assert result.stderr.strip() == (
+        f"[producer] error: {expected} not found (set PROJECT1_ROOT to the repository root)"
+    )
+    assert result.stdout == ""
+
+
+def test_shop_csv_without_a_required_column_exits_2_naming_it(tmp_path):
+    shop = tmp_path / "reference-data" / "shop_master"
+    shop.mkdir(parents=True)
+    shutil.copy(SHOP_MASTER / "customers.csv", shop / "customers.csv")
+    with open(SHOP_MASTER / "products.csv", newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    columns = [column for column in rows[0] if column != "product_status"]
+    with open(shop / "products.csv", "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    result = run_producer_with_root(tmp_path)
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == (
+        f"[producer] error: {shop / 'products.csv'} lacks required column(s): product_status"
+    )
+    assert "Traceback" not in result.stderr
