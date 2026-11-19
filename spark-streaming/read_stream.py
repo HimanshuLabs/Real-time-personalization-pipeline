@@ -332,19 +332,37 @@ def install_stop_handlers():
     signal.signal(signal.SIGTERM, request_stop)
 
 
+def max_offsets_per_trigger():
+    # Optional cap on the Kafka records one micro-batch reads (all partitions
+    # together), so a backlog (a restart, a replanned batch) is read in bounded
+    # batches. Unset or empty: no cap, Spark's default.
+    value = os.environ.get("STREAM_MAX_OFFSETS_PER_TRIGGER", "")
+    if value == "":
+        return None
+    if not value.isdigit() or int(value) < 1:
+        raise SystemExit(
+            "[stream] error: STREAM_MAX_OFFSETS_PER_TRIGGER must be a positive integer, "
+            f"got {value!r}"
+        )
+    return int(value)
+
+
 def main():
     # First, so a Ctrl+C or SIGTERM during start-up (Spark and the queries take
     # several seconds to start) is noticed instead of ignored.
     install_stop_handlers()
 
+    # A bad setting stops here, before Spark starts.
+    max_offsets = max_offsets_per_trigger()
+
     # Stopped before this process started: don't start Spark at all.
     if not should_stop():
-        run_stream()
+        run_stream(max_offsets)
 
     print("[stream] stopped cleanly", flush=True)
 
 
-def run_stream():
+def run_stream(max_offsets=None):
     spark = (
         SparkSession.builder.appName("KafkaStructuredStreamWithDLQ")
         .config("spark.sql.session.timeZone", "UTC")
@@ -360,7 +378,7 @@ def run_stream():
         spark.sparkContext.setLogLevel("WARN")
 
         if not should_stop():
-            raw_df = (
+            reader = (
                 spark.readStream.format("kafka")
                 .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
                 .option("subscribe", "user_events")
@@ -368,8 +386,10 @@ def run_stream():
                 # events produced before the first run aren't skipped. Re-reads are
                 # safe because Silver drops duplicate event_ids.
                 .option("startingOffsets", "earliest")
-                .load()
             )
+            if max_offsets is not None:
+                reader = reader.option("maxOffsetsPerTrigger", str(max_offsets))
+            raw_df = reader.load()
 
             valid_df, invalid_df = split_valid_invalid(build_validated(parse_events(raw_df)))
 

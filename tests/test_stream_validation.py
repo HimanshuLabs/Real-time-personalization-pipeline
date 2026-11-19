@@ -629,3 +629,67 @@ def test_launcher_turns_a_group_signal_into_the_stop_file(tmp_path, signum):
     assert ignored & (1 << (signal.SIGINT - 1)), "spark-submit must ignore SIGINT"
     assert ignored & (1 << (signal.SIGTERM - 1)), "spark-submit must ignore SIGTERM"
     assert list(stop_root.iterdir()) == []
+
+
+# --- STREAM_MAX_OFFSETS_PER_TRIGGER ----------------------------------------------------
+
+
+class OptionRecordingSpark(FakeRunningSpark):
+    """Records the Kafka source options; stops on the first wait."""
+
+    def __init__(self, stop_file):
+        super().__init__(stop_file)
+        self.options = {}
+
+    def option(self, key, value):
+        self.options[key] = value
+        return self
+
+    def awaitAnyTermination(self, timeout):
+        self.stop_file.touch()
+        return False
+
+
+@pytest.mark.parametrize(("value", "expected"), [("", None), ("300000", "300000")])
+def test_max_offsets_per_trigger_only_when_set(monkeypatch, capsys, tmp_path, value, expected):
+    monkeypatch.setenv("STREAM_MAX_OFFSETS_PER_TRIGGER", value)
+    stop_file = tmp_path / "stop"
+    module = load_read_stream(monkeypatch, "read_stream_max_offsets", stop_file)
+    fake = OptionRecordingSpark(stop_file)
+    monkeypatch.setattr(module, "SparkSession", fake)
+    monkeypatch.setattr(module, "parse_events", lambda df: df)
+    monkeypatch.setattr(module, "build_validated", lambda df: df)
+    monkeypatch.setattr(module, "split_valid_invalid", lambda df: ("valid", "invalid"))
+    monkeypatch.setattr(module, "start_bronze_query", lambda df: FakeQuery())
+    monkeypatch.setattr(module, "start_dlq_query", lambda df: FakeQuery())
+
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        module.main()
+    finally:
+        for s, handler in handlers.items():
+            signal.signal(s, handler)
+
+    assert fake.options.get("maxOffsetsPerTrigger") == expected
+    assert fake.options["subscribe"] == "user_events"
+    assert fake.options["startingOffsets"] == "earliest"
+    assert capsys.readouterr().out.strip() == "[stream] stopped cleanly"
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "1e5", "lots"])
+def test_bad_max_offsets_per_trigger_stops_before_spark(monkeypatch, tmp_path, value):
+    monkeypatch.setenv("STREAM_MAX_OFFSETS_PER_TRIGGER", value)
+    module = load_read_stream(monkeypatch, "read_stream_bad_max_offsets", tmp_path / "stop")
+    monkeypatch.setattr(module, "SparkSession", NoSpark())
+
+    handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        with pytest.raises(SystemExit) as stop:
+            module.main()
+    finally:
+        for s, handler in handlers.items():
+            signal.signal(s, handler)
+
+    assert str(stop.value) == (
+        f"[stream] error: STREAM_MAX_OFFSETS_PER_TRIGGER must be a positive integer, got {value!r}"
+    )
