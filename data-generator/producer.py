@@ -7,9 +7,11 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 from confluent_kafka import Producer
 
@@ -18,8 +20,12 @@ from confluent_kafka import Producer
 PROJECT_ROOT = os.environ.get("PROJECT1_ROOT", str(Path(__file__).resolve().parents[1]))
 
 # Read-only export of P2's warehouse: the current SCD2 rows of
-# warehouse.dim_customer and warehouse.dim_product.
-SHOP_MASTER_DIR = "reference-data/shop_master"
+# warehouse.dim_customer and warehouse.dim_product. SHOP_MASTER_DIR picks
+# another export (reference-data/export_shop_master.py writes one): a relative
+# path resolves from PROJECT1_ROOT, an absolute one is used as is. Unset or
+# empty means the committed reference-data/shop_master.
+DEFAULT_SHOP_MASTER_DIR = "reference-data/shop_master"
+SHOP_MASTER_DIR = os.environ.get("SHOP_MASTER_DIR") or DEFAULT_SHOP_MASTER_DIR
 
 # Optional cap: only the first NUM_USERS customers of customers.csv shop.
 # Unset or empty means every customer.
@@ -251,7 +257,11 @@ def parse_product(row):
 def read_shop_csv(root, file_name, required_columns, parse_row, key):
     path = os.path.join(root, SHOP_MASTER_DIR, file_name)
     if not os.path.isfile(path):
-        raise ShopDataError(f"{path} not found (set PROJECT1_ROOT to the repository root)")
+        if SHOP_MASTER_DIR == DEFAULT_SHOP_MASTER_DIR:
+            hint = "set PROJECT1_ROOT to the repository root"
+        else:
+            hint = "check SHOP_MASTER_DIR"
+        raise ShopDataError(f"{path} not found ({hint})")
 
     with open(path, newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
@@ -706,10 +716,29 @@ class Session:
         }
 
 
-class SessionPool:
-    """Up to max_active concurrent sessions; a finished one is replaced."""
+class UserPlan(NamedTuple):
+    """A run with a session target (PRODUCER_ONE_PASS=1); see SessionPool."""
 
-    def __init__(self, max_active=MAX_ACTIVE_SESSIONS, num_users=None):
+    seed: int
+    shard_index: int
+    shard_count: int
+    total_sessions: int  # for all shards together
+
+
+class SessionPool:
+    """Up to max_active concurrent sessions; a finished one is replaced.
+
+    Without a plan (the default) the pool runs until stopped, and each new
+    session goes to a random free active user. With a plan, the active users
+    are shuffled by plan.seed and shard i of n takes every n-th of them; the
+    shard first gives each of its users exactly one session, in that order,
+    then starts extra sessions with the default rule among its own users until
+    its share of plan.total_sessions has started, and stops once every session
+    has finished (next_event returns None). A plan also seeds the event draws,
+    so the same plan gives the same users, sessions and draws.
+    """
+
+    def __init__(self, max_active=MAX_ACTIVE_SESSIONS, num_users=None, plan=None):
         # num_users caps the users to the first N customers; None means all of them.
         self.num_users = NUM_USERS if num_users is None else num_users
         if self.num_users is not None and self.num_users < 1:
@@ -723,23 +752,58 @@ class SessionPool:
             scope = "customers.csv" if self.num_users is None else f"NUM_USERS={self.num_users}"
             raise ValueError(f"{scope} has no active accounts; use a larger NUM_USERS")
 
+        self.plan = plan
+        self.sessions_target = None  # None: run until stopped
+        # The users this pool picks from; positions in this list identify them.
+        self.shard_user_ids = self.active_user_ids
+        if plan is not None:
+            self.shard_user_ids, self.sessions_target = shard_of(self.active_user_ids, plan)
+            # Every shard its own stream, the same for the same plan.
+            random.seed(f"producer-events:{plan.seed}:{plan.shard_index}/{plan.shard_count}")
+
         # One session per active user at a time, so never more sessions than
         # active users; otherwise start_session could never find a free user.
-        self.max_active = min(max_active, len(self.active_user_ids))
+        self.max_active = min(max_active, len(self.shard_user_ids))
         self.active = []
+        self.sessions_started = 0
         self.sessions_completed = 0
         self.last_event_at = {}  # user_id -> time of that user's previous event
         self.stock = {}  # product_name -> units in stock
 
+    @property
+    def target_reached(self):
+        return self.sessions_target is not None and self.sessions_started >= self.sessions_target
+
     def start_session(self):
         # Active accounts only, one session per user at a time.
-        busy_users = {session.user_id for session in self.active}
-        free_users = [user_id for user_id in self.active_user_ids if user_id not in busy_users]
-        self.active.append(Session(random.choice(free_users)))
+        users = self.shard_user_ids
+        if self.plan is not None and self.sessions_started < len(users):
+            position = self.sessions_started  # the pass: each user once, in shard order
+        else:
+            position = self.pick_free_position(users)
+        session = Session(users[position])
+        session.user_position = position
+        self.active.append(session)
+        self.sessions_started += 1
+
+    def pick_free_position(self, users):
+        # A random free user, drawn exactly like random.choice over the free
+        # users in list order (one randrange over their count), without building
+        # that list: step over the busy positions, at most max_active of them.
+        busy = sorted(session.user_position for session in self.active)
+        position = random.randrange(len(users) - len(busy))
+        for taken in busy:
+            if taken > position:
+                break
+            position += 1
+        return position
 
     def next_event(self):
-        while len(self.active) < self.max_active:
+        """The next event, or None once a plan's sessions have all finished."""
+        while len(self.active) < self.max_active and not self.target_reached:
             self.start_session()
+        if not self.active:
+            return None
 
         session = random.choice(self.active)
         now = datetime.now(timezone.utc)
@@ -786,6 +850,28 @@ class SessionPool:
         if remaining < RESTOCK_BELOW:
             self.stock[product] = random.randint(*INITIAL_STOCK_RANGE)
         return remaining
+
+
+def shard_of(active_user_ids, plan):
+    """(this shard's users in pass order, this shard's session target) for a plan."""
+    # The same shuffle in every process of the run, so shards never share a user.
+    order = list(active_user_ids)
+    random.Random(f"user-cycle:{plan.seed}").shuffle(order)
+    users = order[plan.shard_index :: plan.shard_count]
+    shard = f"{plan.shard_index}/{plan.shard_count}"
+    if not users:
+        raise ValueError(f"shard {shard} has no active users; use fewer shards")
+
+    # The total split evenly; the first shards take the remainder.
+    target = plan.total_sessions // plan.shard_count + (
+        plan.shard_index < plan.total_sessions % plan.shard_count
+    )
+    if target < len(users):
+        raise ValueError(
+            f"PRODUCER_TOTAL_SESSIONS={plan.total_sessions} gives shard {shard} "
+            f"{target} sessions, fewer than its {len(users)} active users"
+        )
+    return users, target
 
 
 def get_user_profile(user_id):
@@ -999,20 +1085,120 @@ def pause_between_events():
     time.sleep(random.uniform(0.05, 1.5))
 
 
+def fixed_pause(seconds):
+    def pause():
+        if seconds > 0:
+            time.sleep(seconds)
+
+    return pause
+
+
+class RunSettings(NamedTuple):
+    plan: UserPlan | None
+    pause: Callable[[], None]
+    quiet: bool
+
+
+# Settings that only apply with PRODUCER_ONE_PASS=1.
+PLAN_SETTINGS = ["PRODUCER_SEED", "PRODUCER_TOTAL_SESSIONS", "PRODUCER_SHARD"]
+
+
+def read_flag(environ, name):
+    value = environ.get(name, "")
+    if value not in ("", "0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+def read_int(environ, name, minimum):
+    value = environ.get(name, "")
+    if value == "":
+        raise ValueError(f"{name} is required with PRODUCER_ONE_PASS=1")
+    try:
+        number = int(value)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from None
+    if number < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {number}")
+    return number
+
+
+def read_shard(environ):
+    value = environ.get("PRODUCER_SHARD", "") or "0/1"
+    index, _, count = value.partition("/")
+    if not (index.isdigit() and count.isdigit() and int(index) < int(count)):
+        raise ValueError(f"PRODUCER_SHARD must be i/n with 0 <= i < n, got {value!r}")
+    return int(index), int(count)
+
+
+def read_settings(environ):
+    """Run settings from the environment; all unset gives today's endless run.
+
+    PRODUCER_ONE_PASS=1 with PRODUCER_SEED, PRODUCER_TOTAL_SESSIONS and optionally
+    PRODUCER_SHARD=i/n (default 0/1) runs to a session target (see SessionPool).
+    PRODUCER_PAUSE_SECONDS replaces the random pause between events (0: none).
+    PRODUCER_QUIET=1 prints no events; the stderr summary is unchanged.
+    """
+    plan = None
+    if read_flag(environ, "PRODUCER_ONE_PASS"):
+        shard_index, shard_count = read_shard(environ)
+        plan = UserPlan(
+            seed=read_int(environ, "PRODUCER_SEED", -(2**63)),
+            shard_index=shard_index,
+            shard_count=shard_count,
+            total_sessions=read_int(environ, "PRODUCER_TOTAL_SESSIONS", 1),
+        )
+    else:
+        for name in PLAN_SETTINGS:
+            if environ.get(name, ""):
+                raise ValueError(f"{name} needs PRODUCER_ONE_PASS=1")
+
+    pause = pause_between_events
+    seconds = environ.get("PRODUCER_PAUSE_SECONDS", "")
+    if seconds != "":
+        try:
+            value = float(seconds)
+        except ValueError:
+            value = math.nan
+        if not (math.isfinite(value) and value >= 0):
+            raise ValueError(
+                f"PRODUCER_PAUSE_SECONDS must be a number of seconds >= 0, got {seconds!r}"
+            )
+        pause = fixed_pause(value)
+
+    return RunSettings(plan=plan, pause=pause, quiet=read_flag(environ, "PRODUCER_QUIET"))
+
+
+PROGRESS_EVERY = 100_000  # events, for a run with a session target
+
+
 def exit_status(undelivered):
     # 1 if any event failed or was still queued after the final flush.
     return 1 if delivery_stats["failed"] or undelivered else 0
 
 
-def run(producer, pool, pause=pause_between_events):
-    """Produce until Ctrl+C or SIGTERM, flush, print the summary, return the exit status."""
+def run(producer, pool, pause=pause_between_events, quiet=False):
+    """Produce until Ctrl+C, SIGTERM or the pool's session target, flush, print the
+    summary, return the exit status."""
+    events = 0
     try:
         while True:
             event = pool.next_event()
+            if event is None:  # a plan's sessions have all finished
+                break
 
             produce_event(producer, event)
+            events += 1
 
-            print(json.dumps(event, indent=2))
+            if not quiet:
+                print(json.dumps(event, indent=2))
+            if pool.plan is not None and events % PROGRESS_EVERY == 0:
+                print(
+                    f"[producer] progress: events={events} sessions_started="
+                    f"{pool.sessions_started}/{pool.sessions_target}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             pause()
 
@@ -1021,6 +1207,14 @@ def run(producer, pool, pause=pause_between_events):
 
     finally:
         undelivered = producer.flush(FLUSH_TIMEOUT_SECONDS)
+        if pool.plan is not None:
+            print(
+                f"[producer] sessions: shard={pool.plan.shard_index}/{pool.plan.shard_count} "
+                f"users={len(pool.shard_user_ids)} started={pool.sessions_started} "
+                f"completed={pool.sessions_completed} target={pool.sessions_target}",
+                file=sys.stderr,
+                flush=True,
+            )
         print(
             f"[producer] summary: delivered={delivery_stats['delivered']} "
             f"failed={delivery_stats['failed']} undelivered={undelivered}",
@@ -1035,12 +1229,13 @@ def main():
     install_signal_handlers()
 
     try:
-        pool = SessionPool()
+        settings = read_settings(os.environ)
+        pool = SessionPool(plan=settings.plan)
     except ValueError as exc:
         print(f"[producer] error: {exc}", file=sys.stderr, flush=True)
         return 2
 
-    return run(Producer(producer_config()), pool)
+    return run(Producer(producer_config()), pool, pause=settings.pause, quiet=settings.quiet)
 
 
 if __name__ == "__main__":

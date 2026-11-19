@@ -15,7 +15,8 @@ from pyspark.sql.types import (
 )
 
 # The dims are built from the data the producer loads from P2's shop_master
-# export (reference-data/shop_master/customers.csv and products.csv), so every
+# export (customers.csv and products.csv in SHOP_MASTER_DIR, by default the
+# committed reference-data/shop_master), so every
 # id the producer can emit has a reference row. Importing producer.py does not
 # connect to Kafka: its Producer is only created inside main(). It does load
 # the CSVs, and exits 2 with a clear message if one is missing or incomplete.

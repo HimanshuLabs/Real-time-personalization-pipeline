@@ -2,6 +2,7 @@ import ast
 import csv
 import importlib.util
 import os
+import random
 import shutil
 import signal
 import statistics
@@ -1004,3 +1005,367 @@ def test_shop_csv_without_a_required_column_exits_2_naming_it(tmp_path):
         f"[producer] error: {shop / 'products.csv'} lacks required column(s): product_status"
     )
     assert "Traceback" not in result.stderr
+
+
+# --- SHOP_MASTER_DIR: where the shop CSVs are read from ------------------------------
+
+
+def copy_shop(folder, customers=None):
+    # The committed CSVs, optionally only the first `customers` customers.
+    folder.mkdir(parents=True)
+    shutil.copy(SHOP_MASTER / "products.csv", folder / "products.csv")
+    lines = (SHOP_MASTER / "customers.csv").read_text(encoding="utf-8").splitlines(keepends=True)
+    keep = lines if customers is None else lines[: customers + 1]
+    (folder / "customers.csv").write_text("".join(keep), encoding="utf-8")
+
+
+def test_shop_master_dir_absolute_and_relative_to_project1_root(monkeypatch, tmp_path):
+    first_ten = list(shop_customers())[:10]
+
+    copy_shop(tmp_path / "absolute", customers=10)
+    monkeypatch.delenv("PROJECT1_ROOT", raising=False)
+    absolute = load_fresh_producer(monkeypatch, SHOP_MASTER_DIR=str(tmp_path / "absolute"))
+    assert absolute.USER_IDS == first_ten
+
+    copy_shop(tmp_path / "root" / "exports" / "shop", customers=10)
+    relative = load_fresh_producer(
+        monkeypatch, PROJECT1_ROOT=str(tmp_path / "root"), SHOP_MASTER_DIR="exports/shop"
+    )
+    assert relative.USER_IDS == first_ten
+
+    # Unset or empty: the committed reference-data/shop_master.
+    monkeypatch.delenv("PROJECT1_ROOT", raising=False)
+    monkeypatch.delenv("SHOP_MASTER_DIR", raising=False)
+    assert load_fresh_producer(monkeypatch).USER_IDS == list(shop_customers())
+    assert load_fresh_producer(monkeypatch, SHOP_MASTER_DIR="").USER_IDS == list(shop_customers())
+
+
+def test_missing_shop_master_dir_exits_2_naming_the_setting(tmp_path):
+    missing = tmp_path / "no-export"
+    result = subprocess.run(
+        [sys.executable, str(PRODUCER_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "SHOP_MASTER_DIR": str(missing),
+            "KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:1",
+        },
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == (
+        f"[producer] error: {missing / 'customers.csv'} not found (check SHOP_MASTER_DIR)"
+    )
+    assert result.stdout == ""
+
+
+# --- user pick, session target and run settings --------------------------------------
+
+# Fields that depend on the wall clock or on uuid4, not on the random stream.
+UNSEEDED_FIELDS = {
+    "event_id",
+    "session_id",
+    "event_time",
+    "session_duration_sec",
+    "time_since_last_event_ms",
+}
+
+
+def seeded_view(events):
+    return [{k: v for k, v in event.items() if k not in UNSEEDED_FIELDS} for event in events]
+
+
+def checked_pool(producer, **kwargs):
+    """A SessionPool that asserts, at every session start, that the user is free."""
+
+    class CheckedPool(producer.SessionPool):
+        started = []
+
+        def start_session(self):
+            busy = [session.user_id for session in self.active]
+            super().start_session()
+            user_id = self.active[-1].user_id
+            assert user_id not in busy, f"user {user_id} started a second concurrent session"
+            self.started.append(user_id)
+
+    CheckedPool.started = []
+    return CheckedPool(**kwargs)
+
+
+def drain(pool, limit=100_000):
+    events = []
+    while (event := pool.next_event()) is not None:
+        events.append(event)
+        users = [session.user_id for session in pool.active]
+        assert len(users) == len(set(users)), "a user is in two concurrent sessions"
+        assert len(events) < limit, "the pool never reached its session target"
+    return events
+
+
+def test_default_pick_draws_exactly_like_the_old_rule(producer):
+    # Today's rule, verbatim: one random.choice over the free active users, in order.
+    class OldRulePool(producer.SessionPool):
+        def start_session(self):
+            busy_users = {session.user_id for session in self.active}
+            free_users = [u for u in self.active_user_ids if u not in busy_users]
+            self.active.append(producer.Session(random.choice(free_users)))
+
+    random.seed(20261119)
+    old = [OldRulePool().next_event() for _ in range(3000)]
+    random.seed(20261119)
+    new = [producer.SessionPool().next_event() for _ in range(3000)]
+
+    assert seeded_view(new) == seeded_view(old)
+
+
+def test_default_pick_never_walks_the_whole_user_list(producer):
+    class NoWalk(list):
+        def __iter__(self):
+            raise AssertionError("start_session iterated over every user")
+
+    pool = producer.SessionPool()
+    pool.active_user_ids = pool.shard_user_ids = NoWalk(pool.active_user_ids)
+    events = [pool.next_event() for _ in range(2000)]
+    assert pool.sessions_completed > 200
+    assert {event["user_id"] for event in events} <= set(list.__iter__(pool.active_user_ids))
+
+
+@pytest.mark.parametrize("mode", ["default", "target"])
+def test_never_one_user_in_two_concurrent_sessions(producer, mode):
+    # A small shop (NUM_USERS=30: fewer users than twice MAX_ACTIVE_SESSIONS) makes
+    # a clash likely if the rule were wrong.
+    if mode == "default":
+        pool = checked_pool(producer, num_users=30)
+        for _ in range(3000):
+            pool.next_event()
+            users = [session.user_id for session in pool.active]
+            assert len(users) == len(set(users))
+    else:
+        plan = producer.UserPlan(seed=7, shard_index=0, shard_count=1, total_sessions=200)
+        pool = checked_pool(producer, num_users=30, plan=plan)
+        drain(pool)
+    assert len(pool.started) >= 200
+
+
+def plan(producer, total, seed=11, shard=(0, 1)):
+    return producer.UserPlan(
+        seed=seed, shard_index=shard[0], shard_count=shard[1], total_sessions=total
+    )
+
+
+def sessions_per_user(events):
+    sessions = defaultdict(set)
+    for event in events:
+        sessions[event["user_id"]].add(event["session_id"])
+    return {user: len(ids) for user, ids in sessions.items()}
+
+
+def test_one_pass_then_extra_sessions_up_to_the_target(producer):
+    active = producer.SessionPool().active_user_ids
+    target = round(1.7 * len(active))
+    pool = checked_pool(producer, plan=plan(producer, target))
+
+    events = drain(pool)
+
+    # The pass: every active user once, in the shuffled order, before any extra session.
+    assert sorted(pool.started[: len(active)]) == sorted(active)
+    assert pool.started[: len(active)] == pool.shard_user_ids
+    assert pool.shard_user_ids != active  # shuffled, not file order
+    # Then extra sessions up to the target, every one finished.
+    assert len(pool.started) == pool.sessions_started == pool.sessions_completed == target
+    assert len({event["session_id"] for event in events}) == target
+    per_user = sessions_per_user(events)
+    assert set(per_user) == set(active)  # every active user, no inactive one
+    assert min(per_user.values()) >= 1 and sum(per_user.values()) == target
+    assert max(per_user.values()) >= 2  # the extra sessions repeat users
+    assert not pool.active and pool.next_event() is None
+
+
+def test_same_seed_same_result_other_seed_differs(producer):
+    total = 600
+
+    def run_once(seed):
+        pool = checked_pool(producer, plan=plan(producer, total, seed=seed))
+        events = seeded_view(drain(pool))
+        return list(pool.started), events
+
+    first, second, other = run_once(5), run_once(5), run_once(6)
+    assert len(first[0]) == total
+    assert first == second
+    assert other[0][:50] != first[0][:50]
+
+
+def test_shards_split_users_and_sessions(producer):
+    active = producer.SessionPool().active_user_ids
+    total = 1001
+    pools = [checked_pool(producer, plan=plan(producer, total, shard=(i, 3))) for i in range(3)]
+
+    shards = [set(pool.shard_user_ids) for pool in pools]
+    assert not (shards[0] & shards[1] or shards[0] & shards[2] or shards[1] & shards[2])
+    assert set().union(*shards) == set(active)
+    assert [pool.sessions_target for pool in pools] == [334, 334, 333]
+
+    for pool, shard in zip(pools, shards, strict=True):
+        events = drain(pool)
+        assert sorted(pool.started[: len(shard)]) == sorted(shard)  # the pass
+        assert {event["user_id"] for event in events} == shard  # never another shard's user
+        assert pool.sessions_completed == pool.sessions_target
+
+
+def test_target_below_the_shards_active_users_is_a_clear_error(producer):
+    active = len(producer.SessionPool().active_user_ids)
+    with pytest.raises(ValueError) as error:
+        producer.SessionPool(plan=plan(producer, 2 * (active // 2) - 2, shard=(0, 2)))
+    shard_users = len(
+        producer.SessionPool(plan=plan(producer, active, shard=(0, 2))).shard_user_ids
+    )
+    assert str(error.value) == (
+        f"PRODUCER_TOTAL_SESSIONS={2 * (active // 2) - 2} gives shard 0/2 "
+        f"{active // 2 - 1} sessions, fewer than its {shard_users} active users"
+    )
+
+
+def test_run_stops_at_the_session_target(producer, fresh_stats, capsys):
+    stub = StubProducer()
+    pool = producer.SessionPool(num_users=40, plan=plan(producer, 60))
+
+    status = producer.run(stub, pool, pause=lambda: None, quiet=True)
+
+    out, err = capsys.readouterr()
+    assert status == 0
+    assert out == ""
+    assert pool.sessions_completed == 60
+    assert stub.produced == fresh_stats["delivered"] > 60
+    assert stub.flush_timeouts == [producer.FLUSH_TIMEOUT_SECONDS]
+    users = len(pool.shard_user_ids)
+    assert err.splitlines()[-2:] == [
+        f"[producer] sessions: shard=0/1 users={users} started=60 completed=60 target=60",
+        f"[producer] summary: delivered={stub.produced} failed=0 undelivered=0",
+    ]
+
+
+def test_quiet_prints_no_events_and_the_same_summary(producer, fresh_stats, capsys):
+    status = producer.run(StubProducer(), producer.SessionPool(), pause=stop_after(3), quiet=True)
+
+    out, err = capsys.readouterr()
+    assert status == 0
+    assert out == ""
+    assert err == "[producer] summary: delivered=3 failed=0 undelivered=0\n"
+
+    producer.run(StubProducer(), producer.SessionPool(), pause=stop_after(2))
+    assert capsys.readouterr().out.count('"event_id"') == 2  # default: every event printed
+
+
+def test_default_settings_are_todays_behaviour(producer, monkeypatch):
+    settings = producer.read_settings({})
+    assert settings.plan is None
+    assert settings.pause is producer.pause_between_events
+    assert settings.quiet is False
+
+    slept = []
+    monkeypatch.setattr(producer.time, "sleep", slept.append)
+    producer.read_settings({"PRODUCER_PAUSE_SECONDS": "0"}).pause()
+    producer.read_settings({"PRODUCER_PAUSE_SECONDS": "0.25"}).pause()
+    assert slept == [0.25]
+
+    scale = producer.read_settings(
+        {
+            "PRODUCER_ONE_PASS": "1",
+            "PRODUCER_SEED": "20261119",
+            "PRODUCER_SHARD": "1/2",
+            "PRODUCER_TOTAL_SESSIONS": "650000",
+            "PRODUCER_QUIET": "1",
+        }
+    )
+    assert scale.plan == producer.UserPlan(
+        seed=20261119, shard_index=1, shard_count=2, total_sessions=650000
+    )
+    assert scale.quiet is True
+
+
+ONE_PASS = {"PRODUCER_ONE_PASS": "1", "PRODUCER_SEED": "1", "PRODUCER_TOTAL_SESSIONS": "900"}
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"PRODUCER_SEED": "1"}, "PRODUCER_SEED needs PRODUCER_ONE_PASS=1"),
+        ({"PRODUCER_TOTAL_SESSIONS": "9"}, "PRODUCER_TOTAL_SESSIONS needs PRODUCER_ONE_PASS=1"),
+        ({"PRODUCER_SHARD": "0/2"}, "PRODUCER_SHARD needs PRODUCER_ONE_PASS=1"),
+        ({"PRODUCER_ONE_PASS": "yes"}, "PRODUCER_ONE_PASS must be 0 or 1, got 'yes'"),
+        ({"PRODUCER_QUIET": "true"}, "PRODUCER_QUIET must be 0 or 1, got 'true'"),
+        ({**ONE_PASS, "PRODUCER_SEED": ""}, "PRODUCER_SEED is required with PRODUCER_ONE_PASS=1"),
+        (
+            {**ONE_PASS, "PRODUCER_TOTAL_SESSIONS": ""},
+            "PRODUCER_TOTAL_SESSIONS is required with PRODUCER_ONE_PASS=1",
+        ),
+        ({**ONE_PASS, "PRODUCER_SEED": "x"}, "PRODUCER_SEED must be an integer, got 'x'"),
+        (
+            {**ONE_PASS, "PRODUCER_TOTAL_SESSIONS": "0"},
+            "PRODUCER_TOTAL_SESSIONS must be at least 1, got 0",
+        ),
+        (
+            {**ONE_PASS, "PRODUCER_SHARD": "2/2"},
+            "PRODUCER_SHARD must be i/n with 0 <= i < n, got '2/2'",
+        ),
+        (
+            {**ONE_PASS, "PRODUCER_SHARD": "1"},
+            "PRODUCER_SHARD must be i/n with 0 <= i < n, got '1'",
+        ),
+        (
+            {"PRODUCER_PAUSE_SECONDS": "-1"},
+            "PRODUCER_PAUSE_SECONDS must be a number of seconds >= 0, got '-1'",
+        ),
+        (
+            {"PRODUCER_PAUSE_SECONDS": "nan"},
+            "PRODUCER_PAUSE_SECONDS must be a number of seconds >= 0, got 'nan'",
+        ),
+    ],
+    ids=[
+        "seed_alone",
+        "total_alone",
+        "shard_alone",
+        "one_pass_not_a_flag",
+        "quiet_not_a_flag",
+        "no_seed",
+        "no_total",
+        "seed_not_int",
+        "total_zero",
+        "shard_out_of_range",
+        "shard_not_i_of_n",
+        "pause_negative",
+        "pause_nan",
+    ],
+)
+def test_bad_run_settings_are_refused(producer, env, message):
+    with pytest.raises(ValueError) as error:
+        producer.read_settings(env)
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"PRODUCER_SEED": "1"}, "PRODUCER_SEED needs PRODUCER_ONE_PASS=1"),
+        (
+            {**ONE_PASS, "PRODUCER_TOTAL_SESSIONS": "10"},
+            "PRODUCER_TOTAL_SESSIONS=10 gives shard 0/1 10 sessions, fewer than its ",
+        ),
+    ],
+    ids=["bad_setting", "target_below_users"],
+)
+def test_bad_run_settings_exit_2_with_one_line(env, message):
+    result = subprocess.run(
+        [sys.executable, str(PRODUCER_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, **env, "KAFKA_BOOTSTRAP_SERVERS": "127.0.0.1:1"},
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.startswith(f"[producer] error: {message}")
+    assert result.stderr.count("\n") == 1
+    assert result.stdout == ""
