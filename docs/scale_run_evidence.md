@@ -73,3 +73,22 @@ Checks 27 and 28 compare whole rows on all 19 columns, in both directions, after
 | 29 | distinct event profiles == active users | PASS | 383965 | 383965 |
 | 30 | event profiles not in the export | PASS | 0 | 0 |
 | 31 | published name or tier not in the export | PASS | 0 | 0 |
+
+## Dead-letter path, proven separately
+
+The scale run's dead-letter topic stayed empty because every event was valid: Bronze held exactly the Kafka end offsets (checks 1 and 2), and the stream sends every record to exactly one of Bronze and the dead-letter topic. To show the dead-letter path itself works, a separate check ran the same stream against a throwaway Kafka broker (same image and settings, its own port, no shared storage) with a scratch data folder, so no live topic, file or checkpoint was touched. It produced 1000 valid events from the producer's own code, 50 exact duplicates of them, and 120 invalid events, 3 for each of the stream's 40 validation cases (malformed or empty messages, missing required fields, out-of-range values, product, price and cart-value rules). Each invalid event carried a unique marker, so every dead-letter record could be matched to the event that produced it; empty and NULL messages carry no marker and were counted instead.
+
+| Check | Result | Actual | Expected |
+|---|---|---:|---:|
+| dead-letter records == invalid events produced | PASS | 120 | 120 |
+| marked cases found exactly 3 times each, by their marker | PASS | 38 | 38 |
+| empty and NULL messages in the dead-letter topic | PASS | 3 + 3 | 3 + 3 |
+| dead-letter records with a key | PASS | 0 | 0 |
+| valid events found in the dead-letter topic | PASS | 0 | 0 |
+| Bronze rows == valid events + duplicates | PASS | 1050 | 1000 + 50 |
+| valid events present in Bronze | PASS | 1000 | 1000 |
+| Bronze + dead-letter == events produced | PASS | 1050 + 120 = 1170 | 1170 |
+| Silver duplicates removed | PASS | 50 | 50 |
+| Silver rows | PASS | 1000 | 1000 |
+
+Synthetic data, one local machine, not production; the check is kept outside the repository and is not run in CI.
