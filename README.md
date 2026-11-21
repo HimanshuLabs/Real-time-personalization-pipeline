@@ -12,9 +12,40 @@ An end-to-end data pipeline that turns a stream of e-commerce events into per-us
 
 > Streaming ingestion lands and validates events continuously. Features are computed in batch and published atomically, so the API always reads a complete, consistent table.
 
+## Scale run
+
+The same code has been run end to end on Project 2's full customer base, about 4 lakh customers instead of the default 497. **Synthetic data, one local machine (16 threads), not production.**
+
+| | Count |
+|---|---|
+| Source: export of Project 2's warehouse | 3,99,997 customers and 147 products |
+| Active users | 3,83,965 |
+| Sessions | 6,52,740 |
+| Events | 39,71,944 |
+| Kafka `user_events`, Bronze, Silver | 39,71,944 each (no loss) |
+| Gold and PostgreSQL `user_features` | 3,83,965 users; their `total_events` add up to 39,71,944 |
+| Dead-letter topic | 0 |
+| Feature API | `GET /features` walked end to end: 3,83,965 users |
+| Verification | 31 of 31 checks passed |
+
+Counts use Indian digit grouping: 39,71,944 is 3,971,944.
+
+What the 31 checks prove:
+
+- **Kafka and Bronze (4 checks):** the producer's delivered count equals the Kafka end offsets, Bronze has exactly one row per Kafka record with no repeated `event_id`, and the dead-letter topic is empty. An empty dead-letter topic is the expected result here: every Kafka record is in Bronze, so none was invalid.
+- **Dims and users (7):** the users dim holds every exported customer; the active users in the dim are exactly the users the producer was given; every active user has at least one event and no inactive user has any; Bronze holds exactly the planned number of sessions.
+- **Silver (8):** the same row count as Bronze, no repeated `event_id`, no missing user or product reference, and the Silver report agrees (0 rows dropped by filters, 0 duplicates removed).
+- **Gold (4):** one row per active user; the users' `total_events` add up to the Bronze row count and their `session_count` to the session count.
+- **PostgreSQL publish (5):** `user_features` has Gold's 19 columns in the same order and the same number of rows, and the two tables are identical on every column of every row, compared in both directions.
+- **Export consistency (3):** every active user's profile in the events is a row of the export, and every published name and membership tier comes from the export.
+
+The API walk is a separate check, not one of the 31. The check-by-check counts are in [docs/scale_run_evidence.md](docs/scale_run_evidence.md), and the settings the run needed are in [Running at scale](#running-at-scale).
+
+**What CI proves.** CI runs the tests at the default size (the committed export, about 500 customers) on every push and pull request. It proves the code, not the scale. The numbers above come from one local run, checked by a local verification script.
+
 ## Highlights
 
-- **The live clickstream of a real shop.** Users and products are Project 2's: 497 customers and 147 products exported from P2's warehouse, with the same IDs, names, cities and list prices. The generator runs up to 20 concurrent sessions; each follows one customer and one product through a purchase funnel (entry, search, product views, cart, checkout, payment, order) at the product's INR list price. Inactive accounts and discontinued products never appear in the stream.
+- **The live clickstream of a real shop.** Users and products are Project 2's: the committed export of P2's warehouse has 497 customers and 147 products, with the same IDs, names, cities and list prices. The generator runs up to 20 concurrent sessions; each follows one customer and one product through a purchase funnel (entry, search, product views, cart, checkout, payment, order) at the product's INR list price. Inactive accounts and discontinued products never appear in the stream.
 - **No silent data loss.** Every event lands in exactly one place: Bronze if valid, the dead-letter topic if not. Malformed timestamps and NULLs are routed to the DLQ instead of crashing the stream or vanishing.
 - **Lossless Bronze, dedup in Silver.** Bronze keeps every valid event; duplicates are removed by `event_id` in Silver, so no late event is ever dropped.
 - **Spend, session and recency features.** Gold adds `total_spend`, `session_count` and `recency_hours` to the per-user counts. Price features cover commerce events only, and averages are computed on DECIMAL, so rerunning Gold on the same Silver gives identical feature values; only `features_computed_at` and `recency_hours` change from run to run.
@@ -55,7 +86,7 @@ The full diagram, including monitoring, is in [docs/diagrams/project1_system_arc
 
 ## Example run
 
-One end-to-end run, following the quick start below:
+One end-to-end run at the default size (the committed 497-customer export), following the quick start below. The run on Project 2's full customer base is in [Scale run](#scale-run).
 
 | Stage | Result |
 |---|---|
@@ -168,6 +199,73 @@ pip install -r requirements-ci.txt -r api/requirements.txt
    ```
 
 The batch scripts resolve `data/` and `logs/` from `PROJECT1_ROOT` (default: the repository root), like the stream, so they can be run from any directory. `spark-batch/query_gold_features.py` runs a few example queries on Gold.
+
+### Running at scale
+
+The quick start above runs at the default size. The [scale run](#scale-run) used the same scripts in the same order, with the settings below. None of them is needed at the default size; left unset, every script behaves as in the quick start.
+
+In every terminal, before any command:
+
+```bash
+source venv/bin/activate
+ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
+export SCALE_TMP=/path/without/spaces/p1-scale-tmp
+mkdir -p "$SCALE_TMP/spark" "$SCALE_TMP/tmp"
+export SPARK_LOCAL_DIRS="$SCALE_TMP/spark"
+export TMPDIR="$SCALE_TMP/tmp"
+export SPARK_SUBMIT_OPTS="-Djava.io.tmpdir=$SCALE_TMP/tmp"
+export PYSPARK_PYTHON=python
+export PYSPARK_DRIVER_PYTHON=python
+```
+
+1. Export Project 2's customers and products into a git-ignored folder. P2's database must be running and `P2_EXPORT_PASSWORD` set in the environment:
+
+   ```bash
+   SHOP_MASTER_DIR=reference-data/shop_master_full python reference-data/export_shop_master.py
+   ```
+
+2. Start Kafka and PostgreSQL and create both topics (quick start steps 1 and 2), then start the stream in its own terminal with a larger driver heap and bounded micro-batches:
+
+   ```bash
+   SPARK_DRIVER_MEMORY=4g STREAM_MAX_OFFSETS_PER_TRIGGER=300000 scripts/run_stream.sh
+   ```
+
+3. Produce to a session target in another terminal, with no pause and no per-event print. The seed is any integer; the same seed repeats the same users, sessions and events, so the counts of the scale run belong to its own seed:
+
+   ```bash
+   SHOP_MASTER_DIR=reference-data/shop_master_full PRODUCER_ONE_PASS=1 PRODUCER_SEED=1 PRODUCER_TOTAL_SESSIONS=652740 PRODUCER_PAUSE_SECONDS=0 PRODUCER_QUIET=1 python data-generator/producer.py
+   ```
+
+4. The producer exits on its own once every session has ended and prints its summary. The stream has caught up when the offsets of its latest committed micro-batch add up to the same number as Kafka's end offsets of `user_events`, and that number equals the producer's `delivered` count. Run both from the repository root and compare:
+
+   ```bash
+   docker exec project1_kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic user_events | awk -F: '{s+=$3} END{print s}'
+   n=$(ls checkpoints/bronze_user_events/commits | grep -E '^[0-9]+$' | sort -n | tail -1); tail -n 1 "checkpoints/bronze_user_events/offsets/$n" | grep -oE '"[0-9]+":[0-9]+' | awk -F: '{s+=$2} END{print s}'
+   ```
+
+   If the second number is lower, the stream is still reading the backlog (at most `STREAM_MAX_OFFSETS_PER_TRIGGER` records per 10-second micro-batch); run it again later. Then stop the stream with Ctrl+C in its terminal (see *Operations*), so the batch jobs read a Bronze that no longer changes and do not share the machine with the stream.
+
+5. Build the dims, Silver and Gold, then publish:
+
+   ```bash
+   export SPARK_DRIVER_MEMORY=5g
+   SHOP_MASTER_DIR=reference-data/shop_master_full spark-submit reference-data/create_reference_data.py
+   spark-submit spark-batch/bronze_to_silver.py
+   spark-submit spark-batch/silver_to_gold.py
+   spark-submit --packages org.postgresql:postgresql:42.7.4 spark-batch/publish_gold_to_postgres.py
+   ```
+
+| Setting | Why |
+|---|---|
+| `SHOP_MASTER_DIR` on the export, the producer and the reference dims | These three read the shop CSVs. Unset, each one silently uses the committed 497-customer export, so it is written on every command that reads it. |
+| `PRODUCER_PAUSE_SECONDS=0` | The default pause is a random 0.05 to 1.5 seconds after every event, which would take weeks for 39,71,944 events. |
+| `PRODUCER_QUIET=1` | The default prints every event as indented JSON. The progress and summary lines on stderr stay. |
+| `SPARK_DRIVER_MEMORY` | The scripts start Spark in local mode with Spark's default driver heap of 1 GB. The run used 4g for the stream and 5g for the batch jobs. `scripts/run_stream.sh` passes no extra options to `spark-submit`, so the environment variable is the way to set it. |
+| `STREAM_MAX_OFFSETS_PER_TRIGGER` | Caps the Kafka records per micro-batch, so a backlog is read in bounded batches. |
+| `SPARK_LOCAL_DIRS`, `TMPDIR`, `java.io.tmpdir` | Spark's shuffle files and the JVM's temporary files go to `/tmp` by default. On a machine where `/tmp` is small or memory-backed, point all three at a folder on a real disk. |
+| `ulimit -n 65536` | Raises the shell's open-file limit; a common default is 1024. If the hard limit is lower, the shell's hard limit is used. |
+| `PYSPARK_PYTHON=python`, `PYSPARK_DRIVER_PYTHON=python` | The plain name, with the venv first on `PATH`. Do not set them to a full path if the path has a space in it: Spark's launcher scripts break on it. |
+| No spaces in `SCALE_TMP` | For the same reason, and because `SPARK_SUBMIT_OPTS` is split on spaces. The repository folder itself may have spaces: the scripts quote their own paths. |
 
 ## How it works
 
@@ -355,7 +453,7 @@ Every Spark job runs with `spark.sql.session.timeZone=UTC`. The Airflow DAG `pro
 
 `features` contains every column above except `user_name`, `membership_tier` and `features_computed_at`. That is `user_id`, the six counts, `avg_event_price`, `max_event_price`, `last_event_timestamp`, `unique_products_interacted`, `avg_engagement_score`, `avg_purchase_probability`, `total_spend`, `session_count` and `recency_hours`. Error responses never include exception text; details are logged server-side.
 
-`GET /features` pages through the whole table in `user_id` order (keyset pagination: `WHERE user_id > after_user_id ORDER BY user_id`; defaults `after_user_id=0`, `limit=100`). Each item has the same fields as `features` above plus `features_computed_at`. The API fetches `limit + 1` rows and returns `limit`; the extra row only tells whether another page exists. Pass `next_after_user_id` back as `after_user_id` until it is `null`, which happens on the last page, so a walk never ends with an empty request. It lets a downstream reader fetch every user's features over HTTP; Project 5 currently reads `user_features` from PostgreSQL directly.
+`GET /features` pages through the whole table in `user_id` order (keyset pagination: `WHERE user_id > after_user_id ORDER BY user_id`; defaults `after_user_id=0`, `limit=100`). Each item has the same fields as `features` above plus `features_computed_at`. The API fetches `limit + 1` rows and returns `limit`; the extra row only tells whether another page exists. Pass `next_after_user_id` back as `after_user_id` until it is `null`, which happens on the last page, so a walk never ends with an empty request. It lets a downstream reader fetch every user's features over HTTP; Project 5 reads this endpoint (`GET /features`, paged by `user_id`) and holds no Project 1 database credentials.
 
 ## Configuration
 
@@ -459,7 +557,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 | Features are recomputed in batch; the stream doesn't update `user_features`. | Incremental upserts from the stream (`foreachBatch` + `INSERT … ON CONFLICT`) for near-real-time counters. |
 | `recency_hours` is computed at batch time against `features_computed_at`, so it grows stale between Gold runs. | Compute recency at request time from `last_event_timestamp`. |
 | Every batch run reprocesses all of Bronze. | Incremental processing with a table format such as Delta Lake and `MERGE`. |
-| Bronze is many small files: each 10-second micro-batch writes one Parquet file per Kafka partition and nothing compacts them (this repo's Bronze: 184 files, about 21 KB each, for 2,323 events). Every batch run lists and opens all of them. | Compaction (Delta Lake `OPTIMIZE`, or a periodic rewrite into larger files), or a longer trigger interval. |
+| Bronze is many small files: each 10-second micro-batch writes one Parquet file per Kafka partition and nothing compacts them (one default-size run: 184 files, about 21 KB each, for 2,323 events). Every batch run lists and opens all of them. | Compaction (Delta Lake `OPTIMIZE`, or a periodic rewrite into larger files), or a longer trigger interval. |
 | Bronze stores parsed columns, not the raw Kafka payload. | Keep the raw value alongside the parsed columns for full replay. |
 | DLQ messages don't record which rule rejected them. | Add the failed rule as a Kafka header on each DLQ message. |
 | A session follows one product, so `items_viewed_in_session` and `repeat_product_view_count` always carry the same value. | Let a session browse several products and count views per product. |
