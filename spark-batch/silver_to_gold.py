@@ -202,11 +202,15 @@ def main():
 
         gold_user_features.write.mode("overwrite").parquet(project_path(GOLD_PATH))
 
+        # Print the Gold actually written: each action on gold_user_features
+        # would run the whole aggregation again.
+        written_gold = spark.read.parquet(project_path(GOLD_PATH))
+
         print("Gold user_features written successfully")
         print(f"Features computed at: {features_computed_at.isoformat()}")
-        print(f"Gold user feature count: {gold_user_features.count()}")
+        print(f"Gold user feature count: {written_gold.count()}")
 
-        gold_user_features.show(truncate=False)
+        written_gold.show(truncate=False)
         gold_user_features.printSchema()
     finally:
         spark.stop()

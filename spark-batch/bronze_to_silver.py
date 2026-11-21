@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, count, when
 
 # data/ and logs/ resolve from PROJECT1_ROOT (default: the repository root), like
 # spark-streaming/read_stream.py, so the script works from any directory.
@@ -54,14 +54,20 @@ def build_silver(bronze_df, users_dim, products_dim):
 
     # The file listing is fixed when Bronze is read, so these counts and Silver
     # all see the same Bronze even while the stream keeps appending.
-    bronze_rows = bronze_df.count()
-
-    df = (
-        bronze_df.where(col("user_id").isNotNull())
-        .where(col("event_type").isNotNull())
-        .where(col("event_timestamp").isNotNull())
+    keep = (
+        col("user_id").isNotNull()
+        & col("event_type").isNotNull()
+        & col("event_timestamp").isNotNull()
     )
-    rows_after_filters = df.count()
+    # Both counts in one pass over Bronze.
+    totals = bronze_df.agg(
+        count("*").alias("bronze_rows"),
+        count(when(keep, True)).alias("rows_after_filters"),
+    ).first()
+    bronze_rows = totals["bronze_rows"]
+    rows_after_filters = totals["rows_after_filters"]
+
+    df = bronze_df.where(keep)
 
     df = df.dropDuplicates(["event_id"])
     rows_after_dedup = df.count()
@@ -142,11 +148,14 @@ def main():
 
         # Report on the Silver actually written, not on a re-run of the plan.
         written_silver = spark.read.parquet(project_path(SILVER_PATH))
-        silver_count = written_silver.count()
-        missing_user_ref_count = written_silver.where(col("is_user_reference_missing")).count()
-        missing_product_ref_count = written_silver.where(
-            col("is_product_reference_missing")
-        ).count()
+        written = written_silver.agg(
+            count("*").alias("rows"),
+            count(when(col("is_user_reference_missing"), True)).alias("missing_users"),
+            count(when(col("is_product_reference_missing"), True)).alias("missing_products"),
+        ).first()
+        silver_count = written["rows"]
+        missing_user_ref_count = written["missing_users"]
+        missing_product_ref_count = written["missing_products"]
 
         report = {
             **counts,
@@ -172,7 +181,9 @@ def main():
         print(f"Missing product reference count: {missing_product_ref_count}")
         print(f"Report written to: {REPORT_PATH}")
 
-        silver_df.show(20, truncate=False)
+        # A sample of the rows actually written; re-running the plan would
+        # repeat the whole dedup and both joins for 20 rows.
+        written_silver.show(20, truncate=False)
         silver_df.printSchema()
     finally:
         spark.stop()
