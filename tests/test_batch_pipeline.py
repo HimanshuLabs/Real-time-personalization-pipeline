@@ -24,7 +24,8 @@ SCRIPTS = [
     "spark-batch/query_gold_features.py",
 ]
 
-# P2's shop_master export, which the producer (and so the reference script) loads.
+# The batch lakehouse's shop_master export, which the producer (and so the
+# reference script) loads.
 SHOP_MASTER = Path("reference-data") / "shop_master"
 
 # Three real customers: customer IDs are not contiguous (1-3 don't exist).

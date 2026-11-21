@@ -8,17 +8,17 @@
 
 An end-to-end data pipeline that turns a stream of e-commerce events into per-user personalization features and serves them over an API.
 
-**Kafka → Spark Structured Streaming → Bronze → Silver → Gold → PostgreSQL → FastAPI**, with a dead-letter topic, an atomic serving-table swap, Airflow orchestration and Prometheus/Grafana monitoring. Everything runs locally with Docker. The events are simulated, as the live clickstream of Project 2's shop: its real customer and product master data, with simulated behaviour.
+**Kafka → Spark Structured Streaming → Bronze → Silver → Gold → PostgreSQL → FastAPI**, with a dead-letter topic, an atomic serving-table swap, Airflow orchestration and Prometheus/Grafana monitoring. Everything runs locally with Docker. The events are simulated, as the live clickstream of the shop in the batch lakehouse ([Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics)): its real customer and product master data, with simulated behaviour.
 
 > Streaming ingestion lands and validates events continuously. Features are computed in batch and published atomically, so the API always reads a complete, consistent table.
 
 ## Scale run
 
-The same code has been run end to end on Project 2's full customer base, about 4 lakh customers instead of the default 497. **Synthetic data, one local machine (16 threads), not production.**
+The same code has been run end to end on the batch lakehouse's full customer base, about 4 lakh customers instead of the default 497. **Synthetic data, one local machine (16 threads), not production.**
 
 | | Count |
 |---|---|
-| Source: export of Project 2's warehouse | 3,99,997 customers and 147 products |
+| Source: export of the batch lakehouse's warehouse | 3,99,997 customers and 147 products |
 | Active users | 3,83,965 |
 | Sessions | 6,52,740 |
 | Events | 39,71,944 |
@@ -45,13 +45,13 @@ The API walk is a separate check, not one of the 31. The check-by-check counts a
 
 ## Highlights
 
-- **The live clickstream of a real shop.** Users and products are Project 2's: the committed export of P2's warehouse has 497 customers and 147 products, with the same IDs, names, cities and list prices. The generator runs up to 20 concurrent sessions; each follows one customer and one product through a purchase funnel (entry, search, product views, cart, checkout, payment, order) at the product's INR list price. Inactive accounts and discontinued products never appear in the stream.
+- **The live clickstream of a real shop.** Users and products are the batch lakehouse's: the committed export of its warehouse has 497 customers and 147 products, with the same IDs, names, cities and list prices. The generator runs up to 20 concurrent sessions; each follows one customer and one product through a purchase funnel (entry, search, product views, cart, checkout, payment, order) at the product's INR list price. Inactive accounts and discontinued products never appear in the stream.
 - **No silent data loss.** Every event lands in exactly one place: Bronze if valid, the dead-letter topic if not. Malformed timestamps and NULLs are routed to the DLQ instead of crashing the stream or vanishing.
 - **Lossless Bronze, dedup in Silver.** Bronze keeps every valid event; duplicates are removed by `event_id` in Silver, so no late event is ever dropped.
 - **Spend, session and recency features.** Gold adds `total_spend`, `session_count` and `recency_hours` to the per-user counts. Price features cover commerce events only, and averages are computed on DECIMAL, so rerunning Gold on the same Silver gives identical feature values; only `features_computed_at` and `recency_hours` change from run to run.
 - **Atomic publishing.** Gold is written to a staging table, validated (non-empty, unique `user_id`) and swapped into the live table in one PostgreSQL transaction. A failed publish leaves the old table untouched.
 - **Graceful operations.** Ctrl+C stops the stream cleanly, and a restart resumes from its checkpoints, after a checkpoint repair that works around a Spark 4.1 restart crash. Bronze gets no duplicates or gaps across a restart, because Spark's file sink is exactly-once; the DLQ sink is at-least-once, so a restart can write an invalid event to the DLQ twice. Kafka and PostgreSQL data persist on Docker volumes.
-- **Contracts enforced by tests.** 265 tests run the real Spark scripts on small datasets and check exact results, plus the event schema, session and funnel rules, validation rules, API behaviour and the publish swap and the P2 export against a real PostgreSQL. All 265 pass locally with `P1_TEST_DATABASE_URL` set (0 skipped). CI runs them on every push to `main` and every pull request to `main`, and there they always all run.
+- **Contracts enforced by tests.** 265 tests run the real Spark scripts on small datasets and check exact results, plus the event schema, session and funnel rules, validation rules, API behaviour and the publish swap and the export from the batch lakehouse against a real PostgreSQL. All 265 pass locally with `P1_TEST_DATABASE_URL` set (0 skipped). CI runs them on every push to `main` and every pull request to `main`, and there they always all run.
 - **Observable.** Prometheus scrapes the API and two exporters; Grafana shows API request rate, p95 latency and 5xx rate, Kafka throughput, DLQ rate, feature freshness and the age of the last published feature run.
 
 ## Architecture
@@ -87,7 +87,7 @@ The full diagram, including monitoring, is in [docs/diagrams/project1_system_arc
 
 ## Example run
 
-One end-to-end run at the default size (the committed 497-customer export), following the quick start below. The run on Project 2's full customer base is in [Scale run](#scale-run).
+One end-to-end run at the default size (the committed 497-customer export), following the quick start below. The run on the batch lakehouse's full customer base is in [Scale run](#scale-run).
 
 | Stage | Result |
 |---|---|
@@ -100,8 +100,8 @@ One end-to-end run at the default size (the committed 497-customer export), foll
 | Purchases | 26 |
 | Total spend | 90,052.69 INR |
 | Browse-only users | 13 users with no commerce event, so their price features are NULL |
-| Match with Project 2 | every published user matches its P2 customer (name and tier) |
-| API | `/health` 200; `/features/22` 200; `/features/1` 404 (customer 1 was quarantined in P2, so P1 never produces it); `/features/abc` 422; `GET /features` paged all 321 users in 4 requests (`limit=100`), each once, in ascending `user_id` order, with no `user_name`, `membership_tier` or `email` |
+| Match with the batch lakehouse | every published user matches its customer there (name and tier) |
+| API | `/health` 200; `/features/22` 200; `/features/1` 404 (customer 1 was quarantined in the batch lakehouse, so this pipeline never produces it); `/features/abc` 422; `GET /features` paged all 321 users in 4 requests (`limit=100`), each once, in ascending `user_id` order, with no `user_name`, `membership_tier` or `email` |
 
 Counts vary from run to run, because the producer generates random sessions.
 
@@ -219,7 +219,7 @@ export PYSPARK_PYTHON=python
 export PYSPARK_DRIVER_PYTHON=python
 ```
 
-1. Export Project 2's customers and products into a git-ignored folder. P2's database must be running and `P2_EXPORT_PASSWORD` set in the environment:
+1. Export the batch lakehouse's customers and products into a git-ignored folder. Its database must be running and `P2_EXPORT_PASSWORD` set in the environment:
 
    ```bash
    SHOP_MASTER_DIR=reference-data/shop_master_full python reference-data/export_shop_master.py
@@ -275,9 +275,9 @@ The Airflow DAG runs step 5. Start Airflow with `scripts/run_airflow.sh` from a 
 
 ### Synthetic events
 
-**The shop.** P1 is the live clickstream of Project 2's shop. Its users and catalogue come from `reference-data/shop_master/customers.csv` (497 customers) and `products.csv` (147 products: 138 active, 9 discontinued), a read-only export of P2's warehouse: the current SCD2 rows of `warehouse.dim_customer` and `warehouse.dim_product`, exported on 2026-11-18 from P2 `main` at `c1e117a`. The events therefore carry P2's customer IDs, names, cities, products and list prices; only the behaviour is simulated (no Faker). The producer loads both files once from `PROJECT1_ROOT` and exits 2 with a one-line error if a file or a required column is missing.
+**The shop.** This pipeline is the live clickstream of the batch lakehouse's shop. Its users and catalogue come from `reference-data/shop_master/customers.csv` (497 customers) and `products.csv` (147 products: 138 active, 9 discontinued), a read-only export of its warehouse: the current SCD2 rows of `warehouse.dim_customer` and `warehouse.dim_product`, exported on 2026-11-18 from its `main` at `c1e117a`. The events therefore carry those customer IDs, names, cities, products and list prices; only the behaviour is simulated (no Faker). The producer loads both files once from `PROJECT1_ROOT` and exits 2 with a one-line error if a file or a required column is missing.
 
-**Role next to P2.** P1's events are live product behaviour, for personalization, ML and AI. P2's own web events are its marketing feed, which ties sessions to campaigns. Both share the same customers and products.
+**Role next to the batch lakehouse.** This pipeline's events are live product behaviour, for personalization, ML and AI. The batch lakehouse's own web events are its marketing feed, which ties sessions to campaigns. Both share the same customers and products.
 
 `data-generator/producer.py` keeps up to 20 sessions active (`MAX_ACTIVE_SESSIONS`). Each loop picks one active session at random, emits its next event with the current UTC time, and replaces a finished session with a new one. A session belongs to one user (within one producer process, a user has at most one active session at a time), shares one `session_id` across its events, and follows one product, whose price is fixed for the session.
 
@@ -292,8 +292,8 @@ Each session follows this funnel, one event per step:
 
 Products and prices:
 
-- **Users:** the customer IDs in `customers.csv`. They are not contiguous (IDs 1–3 are quarantined in P2), so a session picks from that list. A profile is the customer's row: `user_name`, `email`, `gender`, `age`, `membership_tier`, `loyalty_points`, `preferred_language`, `home_city`, `home_state`, `user_segment` (P2's `customer_segment`) and `is_prime_user`.
-- **Catalog:** the 147 products of `products.csv` in 6 categories (Electronics, Fashion, Home, Beauty, Fitness, Books); `product_id` is P2's `product_id`.
+- **Users:** the customer IDs in `customers.csv`. They are not contiguous (IDs 1–3 are quarantined in the batch lakehouse), so a session picks from that list. A profile is the customer's row: `user_name`, `email`, `gender`, `age`, `membership_tier`, `loyalty_points`, `preferred_language`, `home_city`, `home_state`, `user_segment` (the batch lakehouse's `customer_segment`) and `is_prime_user`.
+- **Catalog:** the 147 products of `products.csv` in 6 categories (Electronics, Fashion, Home, Beauty, Fitness, Books); `product_id` is the batch lakehouse's `product_id`.
 - **Prices:** every product's list price is its `original_price` in `products.csv` (`PRODUCT_REFERENCE_PRICES`; INR, the events carry no currency field), and `CATEGORY_PRICE_BANDS` is the lowest and highest list price per category. A session's `original_price` is the list price; only the discount varies per session: `discount_percent` is 0–15% in 85% of sessions and 15–40% otherwise.
 - **Product fields:** `PRODUCT_FIELDS` (`product_id`, `product_name`, `category`, `quantity`, `original_price`, `discount_percent`, `discounted_price`, `cart_value`) are NULL on non-commerce events. On commerce events, `quantity` is 1 until `add_to_cart` and the cart quantity from then on. `cart_value` = `discounted_price × quantity` is set only on cart events (`add_to_cart`, `remove_from_cart`, `checkout_started`, `payment_initiated`, `payment_success`, `payment_failed`, `order_placed`).
 - **Status:** `producer.py` defines `account_status` (a seeded draw per customer, 1 account in 25 inactive; 24 of the 497 customers) and `is_product_active` (`product_status` is `active` in `products.csv`; 9 products are discontinued). The reference dims use the same functions. The producer never starts a session for an inactive account and never picks a discontinued product.
@@ -316,7 +316,7 @@ Other fields follow the session and user state:
 `COMMERCE_EVENT_TYPES`, the events that concern a product, are `product_view`, `image_zoom`, `wishlist_add`, `wishlist_remove`, `add_to_cart`, `remove_from_cart`, `checkout_started`, `payment_initiated`, `payment_success`, `payment_failed`, `order_placed`, `order_cancelled`, `return_requested`, `review_submitted`, `rating_given`, `recommendation_impression`, `recommendation_click` and `search_result_click`. Tests keep `EVENT_TYPES` and `COMMERCE_EVENT_TYPES` identical in the producer and the stream, and `COMMERCE_EVENT_TYPES` identical in Gold.
 
 <details>
-<summary><b>Example event</b> (schema 4.0, an <code>add_to_cart</code> for P2 customer 196)</summary>
+<summary><b>Example event</b> (schema 4.0, an <code>add_to_cart</code> for customer 196 of the batch lakehouse)</summary>
 
 ```json
 {
@@ -458,7 +458,7 @@ Every Spark job runs with `spark.sql.session.timeZone=UTC`. The Airflow DAG `pro
 
 `features` contains every column above except `user_name`, `membership_tier` and `features_computed_at`. That is `user_id`, the six counts, `avg_event_price`, `max_event_price`, `last_event_timestamp`, `unique_products_interacted`, `avg_engagement_score`, `avg_purchase_probability`, `total_spend`, `session_count` and `recency_hours`. Error responses never include exception text; details are logged server-side.
 
-`GET /features` pages through the whole table in `user_id` order (keyset pagination: `WHERE user_id > after_user_id ORDER BY user_id`; defaults `after_user_id=0`, `limit=100`). Each item has the same fields as `features` above plus `features_computed_at`. The API fetches `limit + 1` rows and returns `limit`; the extra row only tells whether another page exists. Pass `next_after_user_id` back as `after_user_id` until it is `null`, which happens on the last page, so a walk never ends with an empty request. It lets a downstream reader fetch every user's features over HTTP; Project 5 reads this endpoint (`GET /features`, paged by `user_id`) and holds no Project 1 database credentials.
+`GET /features` pages through the whole table in `user_id` order (keyset pagination: `WHERE user_id > after_user_id ORDER BY user_id`; defaults `after_user_id=0`, `limit=100`). Each item has the same fields as `features` above plus `features_computed_at`. The API fetches `limit + 1` rows and returns `limit`; the extra row only tells whether another page exists. Pass `next_after_user_id` back as `after_user_id` until it is `null`, which happens on the last page, so a walk never ends with an empty request. It lets a downstream reader fetch every user's features over HTTP; The decision-intelligence layer ([AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer)) reads this endpoint (`GET /features`, paged by `user_id`) and holds no database credentials for this pipeline.
 
 ## Configuration
 
@@ -479,14 +479,14 @@ Every Spark job runs with `spark.sql.session.timeZone=UTC`. The Airflow DAG `pro
 | `STREAM_MAX_OFFSETS_PER_TRIGGER` | unset (no cap) | `read_stream.py`: the most Kafka records one micro-batch reads, for a backlog. A positive integer, otherwise the stream exits before Spark starts |
 | `PUBLISH_REFUSE_SHRINK` | unset (off) | `publish_gold_to_postgres.py`: `1` refuses to publish fewer users than the live `user_features` holds (equal, more or a first publish pass); `0` or empty is off; any other value exits 2 before Spark starts. The Airflow DAG sets it on its publish task |
 | `AIRFLOW_HOME` | `airflow_home/` in the repository | `scripts/run_airflow.sh`: Airflow's configuration and metadata folder; a value already set is kept. The script ignores inherited `AIRFLOW__*` variables, so settings go in `airflow_home/airflow.cfg` |
-| `P2_EXPORT_HOST`, `P2_EXPORT_PORT`, `P2_EXPORT_DB`, `P2_EXPORT_USER`, `P2_EXPORT_PASSWORD` | `127.0.0.1`, `5434`, `marketing_analytics`, `p2_reader`, none (required, never printed) | `reference-data/export_shop_master.py`: P2's database, read in one `REPEATABLE READ READ ONLY` transaction with `default_transaction_read_only=on` and a 2-minute statement timeout |
+| `P2_EXPORT_HOST`, `P2_EXPORT_PORT`, `P2_EXPORT_DB`, `P2_EXPORT_USER`, `P2_EXPORT_PASSWORD` | `127.0.0.1`, `5434`, `marketing_analytics`, `p2_reader`, none (required, never printed) | `reference-data/export_shop_master.py`: the batch lakehouse's database, read in one `REPEATABLE READ READ ONLY` transaction with `default_transaction_read_only=on` and a 2-minute statement timeout |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | `producer.py` and `read_stream.py` (both the `user_events` source and the `user_events_dlq` sink) |
 | `SPARK_KAFKA_VERSION` | `4.1.2` | `scripts/run_stream.sh` (Spark Kafka connector version) |
 | `GRAFANA_ADMIN_PASSWORD` | generated and printed once if unset | `monitoring/run_monitoring.sh` |
 
 The feature-freshness exporter's own default host is `host.docker.internal`; `run_monitoring.sh` starts it with `POSTGRES_HOST=localhost` and `POSTGRES_PORT=5433`. Docker Compose creates the database with the default name, user and password above.
 
-**Credentials.** `de_user` / `de_password` are local-demo defaults, set in `docker-compose.yml` and used as fallbacks in the code. Every `POSTGRES_*` value above can be overridden with an environment variable; `.env` and `.env.*` files are git-ignored (except `.env.example`). The API, the feature-freshness exporter, the publish job and the DAG's verification task all connect as `de_user`, the superuser that owns `personalization_db`: this is a single-user local demo with one database account. Project 4 shows the production pattern, a dedicated read-only role (`project5_reader`) for downstream readers.
+**Credentials.** `de_user` / `de_password` are local-demo defaults, set in `docker-compose.yml` and used as fallbacks in the code. Every `POSTGRES_*` value above can be overridden with an environment variable; `.env` and `.env.*` files are git-ignored (except `.env.example`). The API, the feature-freshness exporter, the publish job and the DAG's verification task all connect as `de_user`, the superuser that owns `personalization_db`: this is a single-user local demo with one database account. The anomaly-detection pipeline ([ML-Pipeline-Anomaly-Detection](https://github.com/HimanshuLabs/ML-Pipeline-Anomaly-Detection)) shows the production pattern: a dedicated read-only role (`project5_reader`) for downstream readers.
 
 ## Operations
 
@@ -512,7 +512,7 @@ The feature-freshness exporter's own default host is `host.docker.internal`; `ru
 | One coalesced `is_valid` column | Every event lands in exactly one of Bronze and the DLQ; a NULL can't slip past both filters. |
 | Product fields required only on commerce events | Logins, searches and page views carry no product, and a product or price that is present is still checked. |
 | Staging-table swap | Readers never see a missing, empty or partially written serving table, and a failed publish changes nothing. |
-| Reference dims built from the producer's shop data | The producer and the dims load the same P2 export, so every id the producer emits has a reference row with the same list price and status, and rebuilding them is deterministic. |
+| Reference dims built from the producer's shop data | The producer and the dims load the same export from the batch lakehouse, so every id the producer emits has a reference row with the same list price and status, and rebuilding them is deterministic. |
 | Averages on DECIMAL | Rounding doesn't depend on the order Spark adds the rows, so the same Silver always gives the same feature values (only `features_computed_at` and `recency_hours` change per run). |
 | Spark sessions in UTC | Timestamps mean the same thing on every machine; PostgreSQL stores `timestamp with time zone`. |
 | Signals handled by the Python driver only | A terminal Ctrl+C stops the queries in order instead of killing the JVM mid-batch. |
@@ -527,7 +527,7 @@ python -m pytest -q
 | File | Tests | Covers |
 |---|---:|---|
 | `tests/test_batch_pipeline.py` | 16 | the real reference, Silver, Gold and query scripts on a tiny Bronze, run from another directory with `PROJECT1_ROOT` set (nothing written outside it): duplicate removed, event `user_segment` kept, no column named just `price` while the dim's list price is present as `reference_price`, product-reference flag only for an unknown product, Gold schema (19 columns, names and types in order), commerce-only and DECIMAL-rounded price features, exact `total_spend`, `session_count` and `recency_hours`, dim status equal to the producer's functions, dims equal to the shop CSVs (every customer with its `signup_date`; every product with its name, category, brand, list price and status), Silver report counts (Bronze rows, rows dropped by filters, duplicates removed, Silver rows), parquet dims only (no CSV copies), every batch script has `main()` and starts no Spark on import, Gold fails clearly without Silver |
-| `tests/test_export_shop_master.py` | 12 | the P2 export. Integration (real PostgreSQL, a throwaway `p1_export_test` database with P2's column types, the committed rows loaded in shuffled order plus P2's unknown and invalid members and closed SCD2 versions): the export equals the committed `customers.csv` and `products.csv` byte for byte and prints no password; the session is read-only with a 2-minute statement timeout; a NULL required value, a non-numeric id or two current rows for one id exit 2 and leave the folder unchanged. Without a database: the committed folder (absolute or relative), a missing folder or password and a bad port are refused before connecting; the export columns equal the producer's and the committed headers; `reference-data/shop_master_*/` is git-ignored and the committed folder is not |
+| `tests/test_export_shop_master.py` | 12 | the export from the batch lakehouse. Integration (real PostgreSQL, a throwaway `p1_export_test` database with the batch lakehouse's column types, the committed rows loaded in shuffled order plus its unknown and invalid members and closed SCD2 versions): the export equals the committed `customers.csv` and `products.csv` byte for byte and prints no password; the session is read-only with a 2-minute statement timeout; a NULL required value, a non-numeric id or two current rows for one id exit 2 and leave the folder unchanged. Without a database: the committed folder (absolute or relative), a missing folder or password and a bad port are refused before connecting; the export columns equal the producer's and the committed headers; `reference-data/shop_master_*/` is git-ignored and the committed folder is not |
 | `tests/test_stream_validation.py` | 50 | one DLQ case per validation rule (required fields, contract, scores, `engagement_score`, future `event_time`, product and price rules, `cart_value` NULL / negative / mismatched), non-JSON, empty and NULL Kafka values; valid cases at the edges (login without product fields, `cart_value` within rounding, `engagement_score` 0, `event_time` 30 minutes ahead); the DLQ holds exactly the invalid cases, valid + invalid = input, Bronze/DLQ columns unchanged, `KAFKA_BOOTSTRAP_SERVERS` read for both the source and the DLQ sink, importing the stream module starts no Spark, SIGINT or SIGTERM during start-up stops cleanly without starting a query; with a real local SparkSession, `main()` has its own SIGINT/SIGTERM handlers back in place after PySpark installs its SIGINT handler; the launcher's stop file stops the job cleanly when present at start (Spark not started), during start-up (no query started) and while running (both queries stopped); `scripts/run_stream.sh` with a fake `spark-submit` and `PROJECT1_ROOT` in a temporary folder (the repository's checkpoints are never repaired by a test): valid bash, a fresh stop-file path per run that doesn't exist yet and is removed at exit, `spark-submit`'s exit status passed through, a group SIGINT or SIGTERM (sent twice) turned into the stop file while `spark-submit` ignores both signals; `STREAM_MAX_OFFSETS_PER_TRIGGER` sets `maxOffsetsPerTrigger` only when given, and a bad value stops the job before Spark starts |
 | `tests/test_stream_checkpoints.py` | 15 | the checkpoint repair on fake checkpoints: a pending Bronze batch already in the sink log (`N` or `N.compact`) gets `commits/N` with the latest commit's bytes and checksum; without sink metadata, and always for the DLQ, `offsets/N` and its `.crc` move to `_repaired/`; one line per action; a clean, missing or empty checkpoint is left unchanged; a second run changes nothing more; an earlier repair is never overwritten; the first commit uses Spark's default format; `scripts/run_stream.sh` repairs before `spark-submit` and does not start it when the repair fails |
 | `tests/test_feature_api.py` | 33 | every endpoint through real HTTP requests to the ASGI app, with a fake database: `GET /` message; `GET /metrics` Prometheus text, with series for `/features/{user_id}` and none for `/metrics` itself; `GET /health` 200 and each 503 reason (database unavailable, table missing, table empty); `GET /features/{user_id}` 200 with exactly the 16 feature keys and no `user_name` or `membership_tier`, 404, 422 for a non-integer id (no database call), 500; error bodies carry no credentials or exception text; `GET /features` first, middle, last and empty pages, an exactly full last page ends the walk, full walks with no gaps, repeats or empty extra request, limit and `after_user_id` bounds (422), item keys, 500, parameterised SQL; `POSTGRES_*` honoured and every connection uses the 3-second connect timeout |
@@ -559,7 +559,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 ├── data-generator/         Kafka event producer
 ├── docs/                   architecture notes and full diagram
 ├── monitoring/             Prometheus, Grafana, exporters, start/stop scripts
-├── reference-data/         P2 shop master export, its export script, the Bronze check and the users and products dims
+├── reference-data/         shop master export from the batch lakehouse, its export script, the Bronze check and the users and products dims
 ├── scripts/                stream launcher (clean Ctrl+C handling), checkpoint repair and Airflow launcher
 ├── spark-batch/            Bronze → Silver → Gold → PostgreSQL jobs
 ├── spark-streaming/        Kafka → Bronze / DLQ streaming job
@@ -582,19 +582,19 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 | Some context fields are drawn independently for each event: `traffic_source`, `ab_test_group`, `campaign_id`, `api_latency_ms`, `page_load_time_ms`, `cart_abandonment_probability`, `fraud_score` and `ip_address`. | Keep campaign and experiment fields constant per session and model latency from the device and network. |
 | Each producer process keeps its own sessions, stock levels and per-user gaps, so parallel producers don't share them. | Keep that state in a shared store, or run a single producer. |
 | Every stream start runs `scripts/repair_stream_checkpoints.py` to work around a Spark 4.1.x crash on restart from a planned but uncommitted batch ([apache/spark#55236](https://github.com/apache/spark/issues/55236), closed upstream without a fix). | Remove the repair step from `scripts/run_stream.sh` once a Spark release fixes it. |
-| P1's purchases are simulated and are not reconciled with P2's orders: the two projects share customers and products, not transactions. | Feed P1 purchases into P2's order flow, or reconcile them against P2's orders. |
+| This pipeline's purchases are simulated and are not reconciled with the batch lakehouse's orders: the two share customers and products, not transactions. | Feed these purchases into the batch lakehouse's order flow, or reconcile them against its orders. |
 | Single Kafka broker, replication factor 1. | A multi-broker cluster with replication factor 3. |
 | The Airflow DAG is not executed in CI: CI parses it and checks its task order, but Airflow is not installed there. | A DAG integrity test and a containerised Airflow in the quick start. |
 | Silver keeps one row per `event_id` with `dropDuplicates`, so when two events share an `event_id` but differ in content, which one survives is arbitrary. | Deduplicate on the full payload, or keep the earliest by Kafka offset and send conflicting duplicates to the DLQ. |
 | `user_name` and `membership_tier` come from `MAX_BY(..., event_timestamp)`, so if a user's latest events share the same timestamp with different values, the one picked is arbitrary. | Break ties with a second ordering key, such as the Kafka offset or `event_id`. |
 | One database account: the API, exporter, publish job and DAG all use `de_user`, the superuser that owns `personalization_db`, with demo credentials. | Separate roles per component: a writer for the publish job and a read-only role with `SELECT` on `user_features` for the API, exporter and downstream readers, with passwords from a secrets manager. |
 
-Security and privacy: this is a local demo with default credentials, and the serving table includes `user_name`, the name of P2's customer. A production deployment would use a secrets manager and serve IDs and features only.
+Security and privacy: this is a local demo with default credentials, and the serving table includes `user_name`, the customer's name from the batch lakehouse. A production deployment would use a secrets manager and serve IDs and features only.
 
 ## Operational notes
 
 - `scripts/run_stream.sh` makes the JVM ignore SIGINT and SIGTERM and turns them into the stop file, so the Python driver can stop the queries in order. If the driver ever hangs, only SIGKILL stops the JVM.
-- `product_id`s and `user_id`s are P2's IDs from the `reference-data/shop_master/` export. A new export can add, retire or change rows; the dims rebuild on every run, but events already in Bronze keep the values they were produced with.
+- `product_id`s and `user_id`s are the batch lakehouse's IDs from the `reference-data/shop_master/` export. A new export can add, retire or change rows; the dims rebuild on every run, but events already in Bronze keep the values they were produced with.
 - The Grafana admin password is passed as an environment variable and is visible through `docker inspect project1_grafana`.
 - The `python:3.11-slim` (API) and `python:3.12-slim` (exporter) base images are tagged by minor version only, so a rebuild can pick up a newer patch release; pin a patch tag or digest for reproducible builds.
 
