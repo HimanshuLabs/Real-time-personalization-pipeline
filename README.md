@@ -576,7 +576,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 └── docker-compose.yml      Kafka and PostgreSQL
 ```
 
-## Limitations and next steps
+## Known limits and next steps
 
 | Limitation | Production next step |
 |---|---|
@@ -585,6 +585,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 | Every batch run reprocesses all of Bronze. | Incremental processing with a table format such as Delta Lake and `MERGE`. |
 | Bronze is many small files: each 10-second micro-batch writes one Parquet file per Kafka partition and nothing compacts them (one default-size run: 184 files, about 21 KB each, for 2,323 events). Every batch run lists and opens all of them. | Compaction (Delta Lake `OPTIMIZE`, or a periodic rewrite into larger files), or a longer trigger interval. |
 | Bronze stores parsed columns, not the raw Kafka payload. | Keep the raw value alongside the parsed columns for full replay. |
+| The dead-letter sink is at-least-once: if the stream restarts in the middle of a batch, that batch's dead-letter records can be written a second time. Bronze, a file sink, is exactly-once. | Deduplicate dead-letter records downstream, or write them with a transactional sink. |
 | DLQ messages don't record which rule rejected them. | Add the failed rule as a Kafka header on each DLQ message. |
 | A session follows one product, so `items_viewed_in_session` and `repeat_product_view_count` always carry the same value. | Let a session browse several products and count views per product. |
 | 5 of the 26 event types are never emitted: `search_result_click`, `wishlist_remove`, `order_cancelled`, `return_requested` and `delivery_tracking_view`. | Add funnel steps for them. |
@@ -593,10 +594,15 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request 
 | Every stream start runs `scripts/repair_stream_checkpoints.py` to work around a Spark 4.1.x crash on restart from a planned but uncommitted batch ([apache/spark#55236](https://github.com/apache/spark/issues/55236), closed upstream without a fix). | Remove the repair step from `scripts/run_stream.sh` once a Spark release fixes it. |
 | This pipeline's purchases are simulated and are not reconciled with the batch lakehouse's orders: the two share customers and products, not transactions. | Feed these purchases into the batch lakehouse's order flow, or reconcile them against its orders. |
 | Single Kafka broker, replication factor 1. | A multi-broker cluster with replication factor 3. |
+| CI proves the code at the default size (about 500 customers). The scale run and the dead-letter check are local evidence, recorded in [docs/scale_run_evidence.md](docs/scale_run_evidence.md), and are not run in CI. | A scheduled large-data job, or a CI job with a Kafka service, if the run time is acceptable. |
 | The Airflow DAG is not executed in CI: CI parses it and checks its task order, but Airflow is not installed there. | A DAG integrity test and a containerised Airflow in the quick start. |
 | Silver keeps one row per `event_id` with `dropDuplicates`, so when two events share an `event_id` but differ in content, which one survives is arbitrary. | Deduplicate on the full payload, or keep the earliest by Kafka offset and send conflicting duplicates to the DLQ. |
 | `user_name` and `membership_tier` come from `MAX_BY(..., event_timestamp)`, so if a user's latest events share the same timestamp with different values, the one picked is arbitrary. | Break ties with a second ordering key, such as the Kafka offset or `event_id`. |
+| A rollback target exists only after a publish with `PUBLISH_KEEP_PREVIOUS=1`, and exactly one previous table is kept: the next such publish replaces it (see *Operations*, Rollback). | Keep several generations, or a dump per publish, if a rollback further back is ever needed. |
+| On Python 3.14, pytest shows about 770 `DeprecationWarning`s from inside the pinned FastAPI and Starlette, which call `asyncio.iscoroutinefunction`. They are harmless today. | Removing them needs a FastAPI and Starlette upgrade: the pinned FastAPI 0.115.6 requires Starlette below 0.42. |
 | One database account: the API, exporter, publish job and DAG all use `de_user`, the superuser that owns `personalization_db`, with demo credentials. | Separate roles per component: a writer for the publish job and a read-only role with `SELECT` on `user_features` for the API, exporter and downstream readers, with passwords from a secrets manager. |
+
+Operational caveats (the JVM and signals, IDs after a new export, the Grafana password, base-image tags) are listed under *Operational notes* below.
 
 Security and privacy: this is a local demo with default credentials, and the serving table includes `user_name`, the customer's name from the batch lakehouse. A production deployment would use a secrets manager and serve IDs and features only.
 
