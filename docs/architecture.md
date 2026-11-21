@@ -62,7 +62,7 @@ Each batch run reprocesses all of Bronze. Spark sessions run in UTC. Every scrip
 
 - `GET /health`: 200 only if PostgreSQL is reachable and `user_features` exists and has rows; otherwise 503 with a short reason.
 - `GET /features/{user_id}`: 200 with the user's features (every `user_features` column except `user_name`, `membership_tier` and `features_computed_at`, so including `total_spend`, `session_count` and `recency_hours`), 404 if unknown, 422 if `user_id` is not an integer, 500 if the lookup fails.
-- `GET /features?after_user_id=&limit=`: all users in `user_id` order, one page at a time (keyset pagination; `after_user_id` ≥ 0, default 0; `limit` 1–1000, default 100). Returns `{"items", "count", "next_after_user_id"}`; each item has the `/features/{user_id}` fields plus `features_computed_at`, never `user_name` or `membership_tier`. `next_after_user_id` is null on the last page. 422 for invalid parameters, 500 if the lookup fails. Project 5 currently reads `user_features` from PostgreSQL directly, not through this endpoint.
+- `GET /features?after_user_id=&limit=`: all users in `user_id` order, one page at a time (keyset pagination; `after_user_id` ≥ 0, default 0; `limit` 1–1000, default 100). Returns `{"items", "count", "next_after_user_id"}`; each item has the `/features/{user_id}` fields plus `features_computed_at`, never `user_name` or `membership_tier`. `next_after_user_id` is null on the last page. 422 for invalid parameters, 500 if the lookup fails. Project 5 reads this endpoint (`GET /features`, paged by `user_id`) and holds no Project 1 database credentials.
 - `GET /metrics`: Prometheus metrics.
 
 Error responses never include exception text; details are logged server-side.
