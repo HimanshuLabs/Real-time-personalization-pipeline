@@ -82,6 +82,15 @@ jobs:
             exit 1
           fi
 
+      # requirements-airflow.txt must resolve against Airflow's official 3.2.2
+      # constraints for this job's Python. --dry-run installs nothing, so no other
+      # step sees a different environment; a conflict fails the job.
+      - name: Check Airflow requirements against the official constraints
+        env:
+          PYTHON_MINOR: ${{ matrix.python-version }}
+        run: |
+          pip install --dry-run --ignore-installed -r requirements-airflow.txt --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.2.2/constraints-${PYTHON_MINOR}.txt"
+
   docker-build:
     name: Docker image build validation (API and feature exporter)
     runs-on: ubuntu-latest
