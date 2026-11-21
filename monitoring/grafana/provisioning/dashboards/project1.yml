@@ -1,9 +1,9 @@
 apiVersion: 1
 
 providers:
-  - name: "Project 1 Dashboards"
+  - name: "Real-time-personalization-pipeline dashboards"
     orgId: 1
-    folder: "Project 1"
+    folder: "Real-time-personalization-pipeline"
     type: file
     disableDeletion: false
     editable: true

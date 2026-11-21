@@ -18,7 +18,8 @@ DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "de_password")
 
 exporter_up = Gauge(
     "project1_feature_exporter_up",
-    "Whether the Project 1 feature freshness exporter can query PostgreSQL. 1 = up, 0 = down.",
+    "Whether the feature freshness exporter of Real-time-personalization-pipeline can query "
+    "PostgreSQL. 1 = up, 0 = down.",
 )
 
 user_features_rows = Gauge(

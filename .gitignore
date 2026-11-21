@@ -37,6 +37,6 @@ tmp*.sh
 # Monitoring runtime data
 monitoring/**/data/
 
-# Scale-run exports of P2 (reference-data/export_shop_master.py); the committed
+# Scale-run exports of the batch lakehouse (reference-data/export_shop_master.py); the committed
 # reference-data/shop_master/ is not matched.
 reference-data/shop_master_*/

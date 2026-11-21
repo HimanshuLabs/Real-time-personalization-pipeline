@@ -1,17 +1,19 @@
-"""Export P2's current customers and products for the producer, read-only.
+"""Export the batch lakehouse's current customers and products for the producer, read-only.
 
 Writes customers.csv and products.csv into SHOP_MASTER_DIR (a relative path
 resolves from PROJECT1_ROOT, like producer.py), from the current SCD2 rows of
-P2's warehouse.dim_customer and warehouse.dim_product: is_current, without P2's
-unknown (0) and invalid-reference (-1) members, ordered by numeric id. The files
+the batch lakehouse's warehouse.dim_customer and warehouse.dim_product:
+is_current, without its unknown (0) and invalid-reference (-1) members, ordered
+by numeric id. The files
 have the producer's columns (data-generator/producer.py CUSTOMER_COLUMNS and
 PRODUCT_COLUMNS) in PostgreSQL's CSV format, so an export of the data behind the
 committed reference-data/shop_master gives those files byte for byte.
 
 Read-only: one REPEATABLE READ READ ONLY transaction (both files are one
 snapshot) in a session with default_transaction_read_only=on and a statement
-timeout, SELECT and COPY TO only. It reads as p2_reader by default, P2's
-read-only role, which has SELECT on warehouse (P2 sql/warehouse/create_schemas.sql).
+timeout, SELECT and COPY TO only. It reads as p2_reader by default, the batch
+lakehouse's read-only role, which has SELECT on warehouse
+(sql/warehouse/create_schemas.sql in Batch-Lakehouse-Marketing-Analytics).
 Before writing, every current row must have a positive integer id, no NULL in a
 producer column and be the only current row of its id; otherwise nothing is
 written. The files are written as temporary files and renamed into place, and

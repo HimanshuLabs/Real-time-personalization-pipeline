@@ -30,7 +30,10 @@ DEFAULT_ARGS = {
 
 with DAG(
     dag_id="project1_personalization_batch_pipeline",
-    description="Orchestrates Bronze to Silver to Gold to PostgreSQL for Project 1 real-time personalization pipeline.",
+    description=(
+        "Orchestrates Bronze to Silver to Gold to PostgreSQL for "
+        "Real-time-personalization-pipeline."
+    ),
     start_date=pendulum.datetime(2026, 5, 29, tz="Asia/Kolkata"),
     # Triggered by hand after a stream run; see the README's Airflow notes.
     schedule=None,

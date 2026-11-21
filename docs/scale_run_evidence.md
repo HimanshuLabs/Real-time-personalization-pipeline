@@ -1,6 +1,6 @@
 # Scale run evidence
 
-One end-to-end run of this pipeline on Project 2's full customer base, verified on 2026-11-20.
+One end-to-end run of this pipeline on the full customer base of the batch lakehouse ([Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics)), verified on 2026-11-20.
 
 - **Scope:** synthetic data, one local machine (16 threads), not production.
 - **Source:** a local verification script, kept outside this repository, compared every stage with the one before it. This file lists its 31 checks with the counts it printed. Counts only: no data rows.
