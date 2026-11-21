@@ -19,11 +19,11 @@ from confluent_kafka import Producer
 # like the batch jobs, so the producer works from any directory.
 PROJECT_ROOT = os.environ.get("PROJECT1_ROOT", str(Path(__file__).resolve().parents[1]))
 
-# Read-only export of P2's warehouse: the current SCD2 rows of
-# warehouse.dim_customer and warehouse.dim_product. SHOP_MASTER_DIR picks
-# another export (reference-data/export_shop_master.py writes one): a relative
-# path resolves from PROJECT1_ROOT, an absolute one is used as is. Unset or
-# empty means the committed reference-data/shop_master.
+# Read-only export of the batch lakehouse's warehouse (Batch-Lakehouse-Marketing-Analytics):
+# the current SCD2 rows of warehouse.dim_customer and warehouse.dim_product.
+# SHOP_MASTER_DIR picks another export (reference-data/export_shop_master.py
+# writes one): a relative path resolves from PROJECT1_ROOT, an absolute one is
+# used as is. Unset or empty means the committed reference-data/shop_master.
 DEFAULT_SHOP_MASTER_DIR = "reference-data/shop_master"
 SHOP_MASTER_DIR = os.environ.get("SHOP_MASTER_DIR") or DEFAULT_SHOP_MASTER_DIR
 
@@ -90,8 +90,8 @@ COMMERCE_EVENT_TYPES = [
     "search_result_click",
 ]
 
-# A search uses a query that fits the session's category. One list per P2
-# category; a category in products.csv without a list is a load error.
+# A search uses a query that fits the session's category. One list per
+# batch-lakehouse category; a category in products.csv without a list is a load error.
 CATEGORY_SEARCH_QUERIES = {
     "Electronics": [
         "wireless earbuds",
@@ -211,7 +211,7 @@ class ShopDataError(Exception):
 
 
 def parse_flag(value):
-    # P2 exports booleans as PostgreSQL text: "t" / "f".
+    # The batch lakehouse exports booleans as PostgreSQL text: "t" / "f".
     if value not in ("t", "f"):
         raise ValueError(f"expected 't' or 'f', got {value!r}")
     return value == "t"
@@ -220,7 +220,7 @@ def parse_flag(value):
 def parse_customer(row):
     return {
         "customer_id": int(row["customer_id"]),
-        # The event and reference-data names for P2's columns.
+        # The event and reference-data names for the batch lakehouse's columns.
         "profile": {
             "user_name": row["customer_name"],
             "email": row["email"],
@@ -287,7 +287,7 @@ def read_shop_csv(root, file_name, required_columns, parse_row, key):
 
 
 def load_shop_master(root):
-    """(customers, products) from P2's shop_master export, in file order."""
+    """(customers, products) from the batch lakehouse's shop_master export, in file order."""
     customers = read_shop_csv(
         root, "customers.csv", CUSTOMER_COLUMNS, parse_customer, "customer_id"
     )
@@ -305,8 +305,8 @@ except ShopDataError as exc:
     print(f"[producer] error: {exc}", file=sys.stderr, flush=True)
     sys.exit(2)
 
-# Users are P2's customers. IDs are not contiguous, so sessions pick from this
-# list (file order), never from a numeric range.
+# Users are the batch lakehouse's customers. IDs are not contiguous, so sessions
+# pick from this list (file order), never from a numeric range.
 USER_IDS = [customer["customer_id"] for customer in SHOP_CUSTOMERS]
 CUSTOMERS_BY_ID = {customer["customer_id"]: customer for customer in SHOP_CUSTOMERS}
 
@@ -556,7 +556,7 @@ FUNNEL_STAGE_SCORES = {
 DEFAULT_STAGE_SCORE = -3.0
 STAGE_SCORE_NOISE = 0.4
 
-HOME_COUNTRY = "India"  # P2's shop and every customer in customers.csv
+HOME_COUNTRY = "India"  # the batch lakehouse's shop and every customer in customers.csv
 ABROAD_RATE = 0.05  # events from a random other country
 HOME_CITY_RATE = 0.85  # events from the profile's home_city
 

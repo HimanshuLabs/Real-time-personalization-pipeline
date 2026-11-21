@@ -868,7 +868,7 @@ def test_producer_config_reads_bootstrap_env_and_is_idempotent(monkeypatch):
     )
 
 
-# --- the shop: customers.csv and products.csv from P2's warehouse --------------------
+# --- the shop: customers.csv and products.csv from the batch lakehouse's warehouse --
 
 # Event field -> customers.csv column, and how the CSV text becomes the event value.
 CUSTOMER_FIELD_SOURCES = {
@@ -937,7 +937,7 @@ def test_every_events_product_matches_products_csv(producer, stream):
 
 def test_only_customer_ids_from_the_csv_are_produced(producer, stream):
     customer_ids = set(shop_customers())
-    # IDs 1-3 are quarantined in P2: the IDs are not contiguous.
+    # IDs 1-3 are quarantined in the batch lakehouse: the IDs are not contiguous.
     assert not {1, 2, 3} & customer_ids
     assert producer.USER_IDS == list(shop_customers())
     produced = {event["user_id"] for event in stream}

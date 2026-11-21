@@ -1,6 +1,6 @@
 {
   "uid": "project1-observability",
-  "title": "Project 1 - Real-Time Personalization Observability",
+  "title": "Real-time-personalization-pipeline - Observability",
   "tags": ["project1", "kafka", "fastapi", "prometheus"],
   "timezone": "browser",
   "schemaVersion": 39,

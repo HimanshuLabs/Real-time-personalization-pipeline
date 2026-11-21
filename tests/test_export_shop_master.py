@@ -16,12 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPORT_SCRIPT = ROOT / "reference-data" / "export_shop_master.py"
 SHOP_MASTER = ROOT / "reference-data" / "shop_master"
 
-# --- real PostgreSQL with P2's two dimensions --------------------------------------
+# --- real PostgreSQL with the batch lakehouse's two dimensions ---------------------
 #
 # P1_TEST_DATABASE_URL points at a maintenance database (e.g. .../postgres) of a server
-# where the role may create databases. The tests build TEST_DATABASE with P2's column
-# types (sql/warehouse/create_warehouse_tables.sql in Project 2), load the committed
-# CSVs into it and drop it at the end. Skipped when the variable is unset, except in CI.
+# where the role may create databases. The tests build TEST_DATABASE with the batch
+# lakehouse's column types (sql/warehouse/create_warehouse_tables.sql in
+# Batch-Lakehouse-Marketing-Analytics), load the committed CSVs into it and drop it at
+# the end. Skipped when the variable is unset, except in CI.
 
 TEST_DATABASE = "p1_export_test"
 DATABASE_URL = os.environ.get("P1_TEST_DATABASE_URL")
@@ -62,8 +63,8 @@ CREATE TABLE warehouse.dim_product (
 )
 """
 
-# P2's unknown (0) and invalid-reference (-1) members, and closed SCD2 versions that
-# differ from the current rows: none of them may reach the export.
+# The batch lakehouse's unknown (0) and invalid-reference (-1) members, and closed
+# SCD2 versions that differ from the current rows: none of them may reach the export.
 EXTRA_ROWS = [
     "INSERT INTO warehouse.dim_customer (customer_sk, customer_id, customer_name, membership_tier,"
     " customer_segment, home_city, home_state, country) VALUES"
@@ -128,7 +129,8 @@ def test_db():
 
 @pytest.fixture
 def warehouse(test_db):
-    # A fresh P2-shaped warehouse per test: the committed export plus P2's extra rows.
+    # A fresh warehouse shaped like the batch lakehouse's, per test: the committed
+    # export plus its extra rows.
     with psycopg.connect(test_db, autocommit=True) as conn:
         conn.execute("DROP SCHEMA IF EXISTS warehouse CASCADE")
         conn.execute("CREATE SCHEMA warehouse")
