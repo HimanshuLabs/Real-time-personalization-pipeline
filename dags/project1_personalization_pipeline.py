@@ -183,7 +183,7 @@ with DAG(
             set -euo pipefail
 
             echo "Publishing Gold user features to PostgreSQL..."
-            PUBLISH_REFUSE_SHRINK=1 spark-submit --packages org.postgresql:postgresql:42.7.4 spark-batch/publish_gold_to_postgres.py
+            PUBLISH_KEEP_PREVIOUS=1 PUBLISH_REFUSE_SHRINK=1 spark-submit --packages org.postgresql:postgresql:42.7.4 spark-batch/publish_gold_to_postgres.py
 
             echo "Gold to PostgreSQL completed."
             """

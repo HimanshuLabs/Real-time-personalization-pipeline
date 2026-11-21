@@ -12,6 +12,9 @@ POSTGRES_DB = os.environ.get("POSTGRES_DB", "personalization_db")
 POSTGRES_URL = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 POSTGRES_TABLE = "user_features"
 POSTGRES_STAGING_TABLE = "user_features_staging"
+# With PUBLISH_KEEP_PREVIOUS=1 the replaced table is kept under this name for
+# spark-batch/rollback_user_features.py.
+POSTGRES_PREVIOUS_TABLE = "user_features_previous"
 POSTGRES_USER = os.environ.get("POSTGRES_USER", "de_user")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "de_password")
 
@@ -34,6 +37,11 @@ SWAP_LOCK_TIMEOUT = "10s"
 # sets it; unset (manual runs, tests) the swap runs exactly as before.
 REFUSE_SHRINK_SETTING = "PUBLISH_REFUSE_SHRINK"
 
+# PUBLISH_KEEP_PREVIOUS=1 renames the replaced table to user_features_previous in
+# the same transaction instead of dropping it, so it can be rolled back to. The
+# Airflow DAG sets it; unset, the swap drops the old table exactly as before.
+KEEP_PREVIOUS_SETTING = "PUBLISH_KEEP_PREVIOUS"
+
 
 class ShrinkRefused(RuntimeError):
     """Staging has fewer users than the live table, with refuse_shrink on."""
@@ -44,12 +52,22 @@ class ShrinkRefused(RuntimeError):
         self.live_users = live_users
 
 
+def read_flag(environ, name):
+    """True for <name>=1, False when unset, empty or 0; any other value is an error."""
+    value = environ.get(name, "")
+    if value not in ("", "0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
 def refuse_shrink_setting(environ):
     """True for PUBLISH_REFUSE_SHRINK=1, False when unset, empty or 0."""
-    value = environ.get(REFUSE_SHRINK_SETTING, "")
-    if value not in ("", "0", "1"):
-        raise ValueError(f"{REFUSE_SHRINK_SETTING} must be 0 or 1, got {value!r}")
-    return value == "1"
+    return read_flag(environ, REFUSE_SHRINK_SETTING)
+
+
+def keep_previous_setting(environ):
+    """True for PUBLISH_KEEP_PREVIOUS=1, False when unset, empty or 0."""
+    return read_flag(environ, KEEP_PREVIOUS_SETTING)
 
 
 def connect_to_postgres():
@@ -63,7 +81,10 @@ def connect_to_postgres():
 
 
 def swap_staging_into_live(
-    connect=connect_to_postgres, lock_timeout=SWAP_LOCK_TIMEOUT, refuse_shrink=False
+    connect=connect_to_postgres,
+    lock_timeout=SWAP_LOCK_TIMEOUT,
+    refuse_shrink=False,
+    keep_previous=False,
 ):
     """Validate staging and atomically replace the live table with it.
 
@@ -71,12 +92,17 @@ def swap_staging_into_live(
     lock_timeout, rolls back and leaves the live table untouched. With
     refuse_shrink, a staging table with fewer users than an existing live table
     raises ShrinkRefused; equal or more passes, and so does a first publish.
-    Without it, the statements are exactly those of a plain swap.
+    With keep_previous, an existing live table is renamed to
+    user_features_previous (replacing the one before) instead of being dropped;
+    without a live table, an existing user_features_previous is left untouched.
+    Without either, the statements are exactly those of a plain swap.
     """
     staging = sql.Identifier(POSTGRES_STAGING_TABLE)
     live = sql.Identifier(POSTGRES_TABLE)
+    previous = sql.Identifier(POSTGRES_PREVIOUS_TABLE)
     staging_pkey = sql.Identifier(f"{POSTGRES_STAGING_TABLE}_pkey")
     live_pkey = sql.Identifier(f"{POSTGRES_TABLE}_pkey")
+    previous_pkey = sql.Identifier(f"{POSTGRES_PREVIOUS_TABLE}_pkey")
 
     with connect() as conn, conn.transaction(), conn.cursor() as cur:
         # SET takes no bind parameters; the value is a quoted literal.
@@ -114,7 +140,22 @@ def swap_staging_into_live(
                 staging, staging_pkey
             )
         )
-        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(live))
+        if keep_previous:
+            cur.execute(sql.SQL("SELECT to_regclass({})").format(sql.Literal(POSTGRES_TABLE)))
+            (live_table,) = cur.fetchone()
+            if live_table is not None:
+                # The live table becomes the previous one: the one before goes.
+                # Its key is renamed first, because index names are unique per
+                # schema and staging's key is about to become user_features_pkey.
+                cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(previous))
+                cur.execute(sql.SQL("ALTER TABLE {} RENAME TO {}").format(live, previous))
+                cur.execute(
+                    sql.SQL("ALTER TABLE {} RENAME CONSTRAINT {} TO {}").format(
+                        previous, live_pkey, previous_pkey
+                    )
+                )
+        else:
+            cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(live))
         cur.execute(sql.SQL("ALTER TABLE {} RENAME TO {}").format(staging, live))
         cur.execute(
             sql.SQL("ALTER TABLE {} RENAME CONSTRAINT {} TO {}").format(
@@ -127,6 +168,7 @@ def main():
     # Read before Spark starts, so a bad value costs nothing.
     try:
         refuse_shrink = refuse_shrink_setting(os.environ)
+        keep_previous = keep_previous_setting(os.environ)
     except ValueError as exc:
         print(f"Publish aborted: {exc}", file=sys.stderr, flush=True)
         sys.exit(2)
@@ -164,16 +206,21 @@ def main():
         # Spark is done before the swap, which only needs PostgreSQL.
         spark.stop()
 
-    swap_or_exit(refuse_shrink=refuse_shrink)
+    swap_or_exit(refuse_shrink=refuse_shrink, keep_previous=keep_previous)
 
     print("Gold user_features published to PostgreSQL successfully.")
 
 
-def swap_or_exit(connect=connect_to_postgres, lock_timeout=SWAP_LOCK_TIMEOUT, refuse_shrink=False):
+def swap_or_exit(
+    connect=connect_to_postgres,
+    lock_timeout=SWAP_LOCK_TIMEOUT,
+    refuse_shrink=False,
+    keep_previous=False,
+):
     """Run the swap; on a lock timeout or a refused shrink, explain and exit 1
     instead of a traceback."""
     try:
-        swap_staging_into_live(connect, lock_timeout, refuse_shrink)
+        swap_staging_into_live(connect, lock_timeout, refuse_shrink, keep_previous)
     except ShrinkRefused as exc:
         # The counts only; the driver's own text is not printed.
         print(
