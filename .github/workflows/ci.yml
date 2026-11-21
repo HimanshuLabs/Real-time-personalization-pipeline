@@ -15,7 +15,7 @@ permissions:
 jobs:
   python-validation:
     name: Python lint and validation (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
@@ -93,7 +93,7 @@ jobs:
 
   docker-build:
     name: Docker image build validation (API and feature exporter)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: python-validation
 
     steps:
